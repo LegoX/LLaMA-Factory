@@ -81,6 +81,8 @@ def apply_liger_kernel(
         from liger_kernel.transformers import apply_liger_kernel_to_qwen3_next as apply_liger_kernel
     elif model_type == "qwen3_5":
         from liger_kernel.transformers import apply_liger_kernel_to_qwen3_5 as apply_liger_kernel
+    elif model_type == "qwen3_5_moe":
+        from liger_kernel.transformers import apply_liger_kernel_to_qwen3_5_moe as apply_liger_kernel
     elif model_type == "gpt_oss":
         try:
             from liger_kernel.transformers import apply_liger_kernel_to_gpt_oss as apply_liger_kernel
@@ -96,6 +98,13 @@ def apply_liger_kernel(
         kwargs = {"fused_linear_cross_entropy": False, "cross_entropy": True}
     else:
         kwargs = {}
+
+    if model_type == "qwen3_5_moe":
+        # Liger's swiglu/rms_norm class swaps for Qwen3.5-MoE cause an illegal memory
+        # access on step 2 forward under ZeRO-3 (observed on H800 + transformers 5.6.0
+        # + liger-kernel 0.8.0). Keep only fused_linear_cross_entropy, which is the
+        # part that actually resolves the long-context loss-stage OOM.
+        kwargs.update({"swiglu": False, "rms_norm": False})
 
     apply_liger_kernel(**kwargs)
     logger.info_rank0("Liger kernel has been applied to the model.")

@@ -1,0 +1,55 @@
+### model
+model_name_or_path: /jyx_data/models/Qwen/Qwen3.5-35B-A3B-Base
+trust_remote_code: true
+
+### method
+stage: sft
+do_train: true
+finetuning_type: full
+deepspeed: examples/deepspeed/ds_z3_config.json  # choices: [ds_z0_config.json, ds_z2_config.json, ds_z3_config.json]
+
+### dataset
+dataset: step_3.5_sweagent2520_oh4000_cc_5596-Pangu_s-add_info_12116,MEnvData-SWE-Trajectory-final_trajectories-IM-claude_json-fncall_fixed-interleaving_3918-Pangu_slow-64K-0311_3918-add_info_3918,jierun_glm5_swerebench_oraclesolved_cc_5013,jierun_glm5_swerebench_oraclesolved_oc_3521,jierun_glm5_swerebench_oraclesolved_oh_sdk_2733
+template: qwen3_5_nothink
+cutoff_len: 131072
+rope_scaling: yarn
+max_samples: 1000000
+overwrite_cache: true
+preprocessing_num_workers: 16
+dataloader_num_workers: 4
+
+### output
+output_dir: saves/qwen3_5_35b_a3b_base_pangu_code_data_0417_gbs64pbs1acc8_lr5e-5_epo3
+logging_steps: 1
+# 本机房 fabric MTBF ~4-7h(见 docs/qwen3_5_moe_sft_troubleshooting.md Bug 8e/8f),
+# 单 epoch=260 步 ≈ 4h22min,save_strategy=epoch 会把单次 hang 的损失放大到整个 epoch。
+# 改 step 级 checkpoint,save_steps=50 ≈ 每 50min 落一次,单次 hang 顶多丢 ~50min。
+# save_total_limit=3 控制磁盘(35B + 优化器状态单 ckpt ~400GB)。
+save_strategy: steps
+save_steps: 50
+save_total_limit: 3
+plot_loss: true
+overwrite_output_dir: true
+save_only_model: false
+report_to: wandb  # choices: [none, wandb, tensorboard, swanlab, mlflow]
+
+### train
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 8
+learning_rate: 5.0e-5
+weight_decay: 0.01
+max_grad_norm: 1.0
+num_train_epochs: 3.0
+lr_scheduler_type: cosine
+warmup_ratio: 0.1
+bf16: true
+ddp_timeout: 180000000
+resume_from_checkpoint: null
+enable_liger_kernel: true
+use_unsloth_gc: true
+flash_attn: fa2
+
+# push_to_hub: true
+# hub_model_id: SWE-Lego/qwen3_5_35b_a3b_base_pangu_code_data_0417_gbs64pbs1acc8_lr5e-5_epo3
+# hub_private_repo: true
+# hub_token: <set via HF_TOKEN env or huggingface-cli login>
