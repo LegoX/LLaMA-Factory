@@ -23,7 +23,8 @@ from typing import TYPE_CHECKING, Any, Optional, Union
 
 import numpy as np
 import torch
-from transformers import Seq2SeqTrainer
+from transformers import PreTrainedModel, Seq2SeqTrainer
+from transformers.utils import is_peft_available
 from typing_extensions import override
 
 from ...extras import logging
@@ -187,6 +188,43 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
             generated_tokens = generated_tokens.contiguous()
 
         return loss, generated_tokens, labels
+
+    @override
+    def _save(self, output_dir: str | None = None, state_dict: dict | None = None) -> None:
+        output_dir = output_dir if output_dir is not None else self.args.output_dir
+        os.makedirs(output_dir, exist_ok=True)
+
+        supported_classes = (PreTrainedModel,)
+        if is_peft_available():
+            from peft import PeftModel as _PeftModel
+
+            supported_classes = (PreTrainedModel, _PeftModel)
+
+        if not isinstance(self.model, supported_classes):
+            if state_dict is None:
+                state_dict = self.model.state_dict()
+
+            unwrapped = self.accelerator.unwrap_model(self.model, keep_torch_compile=False)
+            if isinstance(unwrapped, supported_classes):
+                unwrapped.save_pretrained(output_dir, state_dict=state_dict, max_shard_size="5GB")
+            else:
+                import safetensors.torch
+
+                from transformers.utils import SAFE_WEIGHTS_NAME
+
+                logger.info_rank0("Trainer.model is not a `PreTrainedModel`, only saving its state dict.")
+                safetensors.torch.save_file(
+                    state_dict, os.path.join(output_dir, SAFE_WEIGHTS_NAME), metadata={"format": "pt"}
+                )
+        else:
+            self.model.save_pretrained(output_dir, state_dict=state_dict, max_shard_size="5GB")
+
+        if self.processing_class is not None:
+            self.processing_class.save_pretrained(output_dir)
+
+        from transformers.trainer import TRAINING_ARGS_NAME
+
+        torch.save(self.args, os.path.join(output_dir, TRAINING_ARGS_NAME))
 
     def save_predictions(
         self, dataset: "Dataset", predict_results: "PredictionOutput", skip_special_tokens: bool = True
