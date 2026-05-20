@@ -9,7 +9,7 @@ finetuning_type: full
 deepspeed: examples/deepspeed/ds_z3_config.json  # choices: [ds_z0_config.json, ds_z2_config.json, ds_z3_config.json]
 
 ### dataset
-dataset: step_3.5_sweagent2520_oh4000_cc_5596-Pangu_s-add_info_12116,MEnvData-SWE-Trajectory-final_trajectories-IM-claude_json-fncall_fixed-interleaving_3918-Pangu_slow-64K-0311_3918-add_info_3918,swerebench-filtered-oraclesolved-openhands-sdk-1.14.0-GLM-5_im_data_1k-Pangu_s-add_info_1000
+dataset: swelego_chaofan_glm5_swegen_cc_2135,swelego_chaofan_glm5_swegen_oc_1177,swelego_chaofan_glm5_swegen_ohsdk_1140,swelego_jierun_glm5_swerebenchv2_python_oraclesolved_cc_2728,swelego_jierun_glm5_swerebenchv2_python_oraclesolved_oc_1654,swelego_jierun_glm5_swerebenchv2_python_oraclesolved_oh_sdk_1521,swelego_jierun_glm5_v2nopy_full_cc_5128,swelego_jierun_glm5_v2nopy_full_oc_3465,swelego_jierun_glm5_v2nopy_full_oh_sdk_3266
 template: qwen3_5_nothink
 cutoff_len: 131072
 rope_scaling: yarn
@@ -19,10 +19,10 @@ preprocessing_num_workers: 16
 dataloader_num_workers: 4
 
 ### output
-output_dir: saves/qwen3_5_35b_a3b_base_pangu_code_data_0408_gbs64pbs1acc8_lr5e-5_epo3
+output_dir: saves/qwen3_5_35b_a3b_base_selfmade_traj_selected_gbs64pbs1acc8_lr5e-5_epo3
 logging_steps: 1
 save_strategy: steps
-save_steps: 50
+save_steps: 100
 save_total_limit: 3
 plot_loss: true
 overwrite_output_dir: true
@@ -46,6 +46,6 @@ use_unsloth_gc: true
 flash_attn: fa2
 
 # push_to_hub: true
-# hub_model_id: SWE-Lego/qwen3_5_35b_a3b_base_pangu_code_data_0408_gbs64pbs1acc8_lr5e-5_epo3
+# hub_model_id: SWE-Lego/qwen3_5_35b_a3b_base_selfmade_traj_selected_gbs64pbs1acc8_lr5e-5_epo3
 # hub_private_repo: private
 # hub_token: <set via HF_TOKEN env or huggingface-cli login>

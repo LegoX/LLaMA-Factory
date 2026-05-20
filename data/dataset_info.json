@@ -1,4 +1,340 @@
 {
+  "MEnvData-SWE-Trajectory-final_trajectories-IM-claude_json-fncall_fixed-interleaving_3918-Pangu_slow-64K-0311_3918-add_info_3918": {
+    "file_name": "pangu_code_data/MEnvData-SWE-Trajectory-final_trajectories-IM-claude_json-fncall_fixed-interleaving_3918-Pangu_slow-64K-0311_3918-add_info_3918.json",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "messages"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant",
+      "system_tag": "system"
+    }
+  },
+  "jierun_glm5_swerebench_oraclesolved_cc_5013": {
+    "file_name": "pangu_code_data/jierun_glm5_swerebench_oraclesolved_cc_5013.json",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "messages"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant",
+      "system_tag": "system"
+    }
+  },
+  "jierun_glm5_swerebench_oraclesolved_oc_3521": {
+    "file_name": "pangu_code_data/jierun_glm5_swerebench_oraclesolved_oc_3521.json",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "messages"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant",
+      "system_tag": "system"
+    }
+  },
+  "jierun_glm5_swerebench_oraclesolved_oh_sdk_2733": {
+    "file_name": "pangu_code_data/jierun_glm5_swerebench_oraclesolved_oh_sdk_2733.json",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "messages"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant",
+      "system_tag": "system"
+    }
+  },
+  "step_3.5_sweagent2520_oh4000_cc_5596-Pangu_s-add_info_12116": {
+    "file_name": "pangu_code_data/step_3.5_sweagent2520_oh4000_cc_5596-Pangu_s-add_info_12116_shards",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "messages"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant",
+      "system_tag": "system"
+    }
+  },
+  "swerebench-filtered-oraclesolved-openhands-sdk-1.14.0-GLM-5_im_data_1k-Pangu_s-add_info_1000": {
+    "file_name": "pangu_code_data/swerebench-filtered-oraclesolved-openhands-sdk-1.14.0-GLM-5_im_data_1k-Pangu_s-add_info_1000.json",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "messages"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant",
+      "system_tag": "system"
+    }
+  },
+  "swelego_chaofan_glm5_swegen_cc_2135": {
+    "file_name": "SWE-Lego-Live-Resolved-Traj/chaofan_glm5_swegen_cc_2135.json",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "messages"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant",
+      "system_tag": "system"
+    }
+  },
+  "swelego_chaofan_glm5_swegen_oc_1177": {
+    "file_name": "SWE-Lego-Live-Resolved-Traj/chaofan_glm5_swegen_oc_1177.json",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "messages"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant",
+      "system_tag": "system"
+    }
+  },
+  "swelego_chaofan_glm5_swegen_ohsdk_1140": {
+    "file_name": "SWE-Lego-Live-Resolved-Traj/chaofan_glm5_swegen_ohsdk_1140.json",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "messages"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant",
+      "system_tag": "system"
+    }
+  },
+  "swelego_chaofan_glm5_swerebench_oraclesolved_cc_4053": {
+    "file_name": "SWE-Lego-Live-Resolved-Traj/chaofan_glm5_swerebench_oraclesolved_cc_4053.json",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "messages"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant",
+      "system_tag": "system"
+    }
+  },
+  "swelego_chaofan_glm5_swerebench_oraclesolved_oc_3431": {
+    "file_name": "SWE-Lego-Live-Resolved-Traj/chaofan_glm5_swerebench_oraclesolved_oc_3431.json",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "messages"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant",
+      "system_tag": "system"
+    }
+  },
+  "swelego_chaofan_glm5_swerebench_oraclesolved_oh_2808": {
+    "file_name": "SWE-Lego-Live-Resolved-Traj/chaofan_glm5_swerebench_oraclesolved_oh_2808.json",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "messages"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant",
+      "system_tag": "system"
+    }
+  },
+  "swelego_jierun_glm5_swerebench_oraclesolved_cc_5013": {
+    "file_name": "SWE-Lego-Live-Resolved-Traj/jierun_glm5_swerebench_oraclesolved_cc_5013.json",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "messages"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant",
+      "system_tag": "system"
+    }
+  },
+  "swelego_jierun_glm5_swerebench_oraclesolved_oc_3521": {
+    "file_name": "SWE-Lego-Live-Resolved-Traj/jierun_glm5_swerebench_oraclesolved_oc_3521.json",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "messages"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant",
+      "system_tag": "system"
+    }
+  },
+  "swelego_jierun_glm5_swerebench_oraclesolved_oh_sdk_2733": {
+    "file_name": "SWE-Lego-Live-Resolved-Traj/jierun_glm5_swerebench_oraclesolved_oh_sdk_2733.json",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "messages"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant",
+      "system_tag": "system"
+    }
+  },
+  "swelego_jierun_glm5_swerebench_others_cc_2885": {
+    "file_name": "SWE-Lego-Live-Resolved-Traj/jierun_glm5_swerebench_others_cc_2885.json",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "messages"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant",
+      "system_tag": "system"
+    }
+  },
+  "swelego_jierun_glm5_swerebench_others_oc_2637": {
+    "file_name": "SWE-Lego-Live-Resolved-Traj/jierun_glm5_swerebench_others_oc_2637.json",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "messages"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant",
+      "system_tag": "system"
+    }
+  },
+  "swelego_jierun_glm5_swerebench_others_oh_sdk_1843": {
+    "file_name": "SWE-Lego-Live-Resolved-Traj/jierun_glm5_swerebench_others_oh_sdk_1843.json",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "messages"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant",
+      "system_tag": "system"
+    }
+  },
+  "swelego_jierun_glm5_swerebenchv2_python_oraclesolved_cc_2728": {
+    "file_name": "SWE-Lego-Live-Resolved-Traj/jierun_glm5_swerebenchv2_python_oraclesolved_cc_2728.json",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "messages"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant",
+      "system_tag": "system"
+    }
+  },
+  "swelego_jierun_glm5_swerebenchv2_python_oraclesolved_oc_1654": {
+    "file_name": "SWE-Lego-Live-Resolved-Traj/jierun_glm5_swerebenchv2_python_oraclesolved_oc_1654.json",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "messages"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant",
+      "system_tag": "system"
+    }
+  },
+  "swelego_jierun_glm5_swerebenchv2_python_oraclesolved_oh_sdk_1521": {
+    "file_name": "SWE-Lego-Live-Resolved-Traj/jierun_glm5_swerebenchv2_python_oraclesolved_oh_sdk_1521.json",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "messages"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant",
+      "system_tag": "system"
+    }
+  },
+  "swelego_jierun_glm5_v2nopy_full_cc_5128": {
+    "file_name": "SWE-Lego-Live-Resolved-Traj/jierun_glm5_v2nopy_full_cc_5128.json",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "messages"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant",
+      "system_tag": "system"
+    }
+  },
+  "swelego_jierun_glm5_v2nopy_full_oc_3465": {
+    "file_name": "SWE-Lego-Live-Resolved-Traj/jierun_glm5_v2nopy_full_oc_3465.json",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "messages"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant",
+      "system_tag": "system"
+    }
+  },
+  "swelego_jierun_glm5_v2nopy_full_oh_sdk_3266": {
+    "file_name": "SWE-Lego-Live-Resolved-Traj/jierun_glm5_v2nopy_full_oh_sdk_3266.json",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "messages"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant",
+      "system_tag": "system"
+    }
+  },
   "identity": {
     "file_name": "identity.json"
   },

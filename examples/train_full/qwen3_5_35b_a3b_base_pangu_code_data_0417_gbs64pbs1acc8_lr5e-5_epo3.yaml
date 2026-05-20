@@ -21,10 +21,6 @@ dataloader_num_workers: 4
 ### output
 output_dir: saves/qwen3_5_35b_a3b_base_pangu_code_data_0417_gbs64pbs1acc8_lr5e-5_epo3
 logging_steps: 1
-# 本机房 fabric MTBF ~4-7h(见 docs/qwen3_5_moe_sft_troubleshooting.md Bug 8e/8f),
-# 单 epoch=260 步 ≈ 4h22min,save_strategy=epoch 会把单次 hang 的损失放大到整个 epoch。
-# 改 step 级 checkpoint,save_steps=50 ≈ 每 50min 落一次,单次 hang 顶多丢 ~50min。
-# save_total_limit=3 控制磁盘(35B + 优化器状态单 ckpt ~400GB)。
 save_strategy: steps
 save_steps: 50
 save_total_limit: 3
@@ -51,5 +47,5 @@ flash_attn: fa2
 
 # push_to_hub: true
 # hub_model_id: SWE-Lego/qwen3_5_35b_a3b_base_pangu_code_data_0417_gbs64pbs1acc8_lr5e-5_epo3
-# hub_private_repo: true
+# hub_private_repo: private
 # hub_token: <set via HF_TOKEN env or huggingface-cli login>

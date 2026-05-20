@@ -48,48 +48,54 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 cd "$SCRIPT_DIR"
 
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
-# 经过 8a/8b/8c/8d 多轮验证,本机房 RoCE fabric 上瞬态停顿是分钟级,
-# IB QP 重试预算(IB_TIMEOUT × IB_RETRY_CNT ≈ 245s)扛不过,QP 死掉后 NCCL 永远等不到 ACK;
-# 反而纯 socket-on-eth0 由 kernel TCP 自己擦屁股(8b 撑了 6h44m / 388 步 vs 8c/8d 仅 ~12 min)。
-# ZeRO-3 + gradient checkpointing 的算/通比下,RoCE 那点带宽优势在 backward 里被算力盖掉,
-# 实测每步 62s 跟 socket 一致——所以 A 方案: 关 IB,走 socket,稳定性优先。
-export NCCL_DEBUG=${NCCL_DEBUG:-INFO}
-export WANDB_API_KEY=${WANDB_API_KEY:?WANDB_API_KEY must be set; e.g. export WANDB_API_KEY=...}
+export WANDB_API_KEY=${WANDB_API_KEY:-b8d8f033fb501a01c5ef0e04f304e3976016e737}
 
-# === 诊断仪表(供应商要求 5/18: 抓全 traceback,定位前向/反向/数据切片/保存阶段) ===
-# Python 不缓冲 + faulthandler 自动 dump py 栈(SIGABRT/SIGSEGV/SIGFPE 都触发)
+# === 诊断仪表 ===
+# 8j(torch 2.8 → 2.10 升级)之后 4 节点训练稳定,5/18 供应商升单时打开的全 traceback
+# 仪表(NCCL INFO、TRACE_STAGES、TORCH_CPP_LOG_LEVEL=INFO、TRANSFORMERS=info 等)默认关闭。
+# DEBUG_HANG=1 一键切回 5/18 那套排查模式;留作未来 fabric 再退化或 torch 被迫回退时的应急。
+DEBUG_HANG=${DEBUG_HANG:-0}
+
+if [ "$DEBUG_HANG" = "1" ]; then
+    export NCCL_DEBUG=${NCCL_DEBUG:-INFO}
+    export NCCL_DEBUG_SUBSYS=${NCCL_DEBUG_SUBSYS:-INIT,COLL,NET}
+    export TORCH_CPP_LOG_LEVEL=${TORCH_CPP_LOG_LEVEL:-INFO}
+    export TRANSFORMERS_VERBOSITY=${TRANSFORMERS_VERBOSITY:-info}
+    # 阶段级插桩(tools/trace_hook.py): dataloader/forward/backward/save 各打 enter/exit
+    export TRACE_STAGES=${TRACE_STAGES:-1}
+    # collective 级插桩,刷屏量大,仅 hang 现场开
+    export TRACE_COLLECTIVES=${TRACE_COLLECTIVES:-1}
+else
+    export NCCL_DEBUG=${NCCL_DEBUG:-WARN}
+    export NCCL_DEBUG_SUBSYS=${NCCL_DEBUG_SUBSYS:-}
+    export TORCH_CPP_LOG_LEVEL=${TORCH_CPP_LOG_LEVEL:-WARNING}
+    export TRANSFORMERS_VERBOSITY=${TRANSFORMERS_VERBOSITY:-warning}
+    export TRACE_STAGES=${TRACE_STAGES:-0}
+    export TRACE_COLLECTIVES=${TRACE_COLLECTIVES:-0}
+fi
+
+# 以下是零运行时开销的"事后取证"配置,任何模式下都保留 ——
+# 进程不挂时它们不输出任何东西,挂掉时才有用,关掉只会让下一次排查更难。
 export PYTHONUNBUFFERED=${PYTHONUNBUFFERED:-1}
+# faulthandler: SIGABRT/SIGSEGV/SIGFPE 时自动 dump Python 栈
 export PYTHONFAULTHANDLER=${PYTHONFAULTHANDLER:-1}
-# C++ 栈
+# crash 时打印 C++ 栈(平时 silent)
 export TORCH_SHOW_CPP_STACKTRACES=${TORCH_SHOW_CPP_STACKTRACES:-1}
-export TORCH_CPP_LOG_LEVEL=${TORCH_CPP_LOG_LEVEL:-INFO}
-# NCCL hang 时定位具体 collective:本轮一次性提到 INFO + 关键子系统,稳了再降回 WARN
-export NCCL_DEBUG_SUBSYS=${NCCL_DEBUG_SUBSYS:-INIT,COLL,NET}
-# 阶段级插桩(tools/trace_hook.py): dataloader/forward/backward/save 各打 enter/exit
-export TRACE_STAGES=${TRACE_STAGES:-1}
-# collective 级插桩刷屏,默认关;hang 现场再开
-export TRACE_COLLECTIVES=${TRACE_COLLECTIVES:-0}
-export TRANSFORMERS_VERBOSITY=${TRANSFORMERS_VERBOSITY:-info}
 
-# OOB + 数据面统一走 eth0。多网卡环境若 NCCL 自动探测错网卡(走到 docker0/veth1/lo)
-# 极易导致跨机集合通信 hang/超时(4 节点 run 20260516_004703 在 step 69 即此症状)。
+# NCCL 通路:socket-on-eth0(关 IB)+ 多路 socket + 8 MiB ring buffer。
+# 8j torch 2.10 升级后多机已稳,这套是 8a-8i 留下的纵深防御,无副作用,保留。
+# 历史与各参数取值依据见 docs/qwen3_5_moe_sft_troubleshooting.md Bug 8。
 export NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-eth0}
 export GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME:-eth0}
 export TP_SOCKET_IFNAME=${TP_SOCKET_IFNAME:-eth0}
-
-# 明确禁掉 IB 探测,不让 NCCL 再尝试走 mlx5_bond_*。配合上面的 SOCKET_IFNAME 就是 socket 通路。
 export NCCL_IB_DISABLE=${NCCL_IB_DISABLE:-1}
-# socket 模式下并行收发线程,压尾延迟。8 × 8 = 64 路 socket 已足够喂满 100/200G eth0。
-# export NCCL_SOCKET_NTHREADS=${NCCL_SOCKET_NTHREADS:-8}
-# export NCCL_NSOCKS_PERTHREAD=${NCCL_NSOCKS_PERTHREAD:-8}
+export NCCL_SOCKET_NTHREADS=${NCCL_SOCKET_NTHREADS:-8}
+export NCCL_NSOCKS_PERTHREAD=${NCCL_NSOCKS_PERTHREAD:-8}
+export NCCL_BUFFSIZE=${NCCL_BUFFSIZE:-8388608}
 
-# watchdog/诊断: TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC 控制 monitor thread 在 watchdog
-# 触发后等多久才 SIGABRT 进程(从而让 torchrun 退出、wrapper 进入 retry)。
-# 注意: 不是"trace dump 容忍度"——而是"hang 之后再卡多少秒才放手"。
-# 8h 实测: 之前设 1800s 让 20260517_093118 在 fire 后又空转半小时 retry 才起。
-# 健康 rank 几秒就能 dump 完;卡死 rank 等再久也不会 dump。180s 足够留 margin。
-# 8d 一度 patch 过 deepspeed/comm/torch.py 给子 PG 改 1800s,8f run(20260516_194508)证实
-# collective 跑满 1800s 也没自愈,那次 patch 纯粹白等 1200s——已撤回(参见 docs Bug 8g)。
+# watchdog:fire 后 180s SIGABRT 让 torchrun 退出进 auto-retry。其它两个是事后取证开关。
+# (TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC 不是"hang 容忍度",而是"hang 之后再卡多少秒才放手";
+#  8d 把它推到 1800s 反而白等 1200s,见 docs Bug 8g。)
 export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=${TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC:-180}
 export TORCH_FR_BUFFER_SIZE=${TORCH_FR_BUFFER_SIZE:-2097152}
 export TORCH_NCCL_DUMP_ON_TIMEOUT=${TORCH_NCCL_DUMP_ON_TIMEOUT:-1}
@@ -208,7 +214,7 @@ NNODES=${NNODES:-1}
 NODE_RANK=${NODE_RANK:-0}
 NPROC_PER_NODE=${NPROC_PER_NODE:-8}
 MASTER_PORT=${MASTER_PORT:-29500}
-TRAIN_CONFIG=${TRAIN_CONFIG:-examples/train_full/qwen3_5_35b_a3b_base_pangu_code_data_0417_gbs64pbs1acc8_lr5e-5_epo3.yaml}
+TRAIN_CONFIG=${TRAIN_CONFIG:-examples/train_full/qwen3_5_35b_a3b_base_selfmade_traj_selected_gbs64pbs1acc8_lr5e-5_epo3.yaml}
 TRAIN_CONFIG_BASENAME=$(basename "$TRAIN_CONFIG")
 RUN_TIMESTAMP=$(date +%Y%m%d_%H%M)
 RUN_NAME=${RUN_NAME:-${TRAIN_CONFIG_BASENAME%.*}_${RUN_TIMESTAMP}}
@@ -376,34 +382,38 @@ fi
 clear_gpu_procs
 nvidia-smi
 
-# 训练重试循环: 本机房 fabric MTBF ~4-7h(见 docs Bug 8e/8f),watchdog fire 后整个
-# torchrun 退出。每次循环重新进入脚本顶部 RESUME 逻辑会从最近 checkpoint 自动续训。
+# 训练重试循环: 8j torch 2.10 升级后稳态下基本不触发, 留作偶发 hang / 节点抖动的兜底
+# (watchdog fire 后 torchrun 退出, 下次循环从最近 checkpoint 自动续训, 见 docs Bug 8f)。
 # AUTO_RETRY=0 关闭自动重试; MAX_RETRIES 上限避免死循环(checkpoint 没动则停)。
 AUTO_RETRY=${AUTO_RETRY:-1}
-MAX_RETRIES=${MAX_RETRIES:-1}
+MAX_RETRIES=${MAX_RETRIES:-20}
 RETRY_BACKOFF=${RETRY_BACKOFF:-30}
 
 run_torchrun() {
-    local tr_log_dir="$LOG_DIR/torchrun_${RUN_TIMESTAMP}_node${NODE_RANK}_attempt${attempt}"
-    mkdir -p "$tr_log_dir"
     # TRACE_STAGES=1: tools/trace_train.py 先 import trace_hook 再 runpy src/train.py
     # TRACE_STAGES=0: 退化为原行为,直接跑 src/train.py
     local entry="src/train.py"
-    if [ "${TRACE_STAGES:-1}" = "1" ] && [ -f "tools/trace_train.py" ]; then
+    if [ "${TRACE_STAGES:-0}" = "1" ] && [ -f "tools/trace_train.py" ]; then
         entry="tools/trace_train.py"
     fi
 
-    # --tee 3 / --redirects 3: 全部 rank 的 stdout+stderr 既前缀回流到 console,
-    # 又落盘到 $tr_log_dir/attempt_*/<local_rank>/{stdout,stderr}.log,方便事后 grep 单 rank
-    # awk 给每行加毫秒时间戳;PIPESTATUS[0] 仍是 torchrun 真实 rc
+    # 稳态(DEBUG_HANG=0): 只产出 $TRAIN_LOG 一份合并日志,所有 rank 经 awk 加毫秒时间戳。
+    # 排查模式(DEBUG_HANG=1): 额外开 torchrun --tee/--redirects, 把每个 rank 的 stdout+stderr
+    # 单独落盘到 $tr_log_dir/<local_rank>/{stdout,stderr}.log, 方便事后 grep 单 rank。
+    local tee_args=()
+    if [ "${DEBUG_HANG:-0}" = "1" ]; then
+        local tr_log_dir="$LOG_DIR/torchrun_${RUN_TIMESTAMP}_node${NODE_RANK}_attempt${attempt}"
+        mkdir -p "$tr_log_dir"
+        tee_args=(--tee 3 --redirects 3 --log-dir "$tr_log_dir")
+    fi
+
+    # PIPESTATUS[0] 仍是 torchrun 真实 rc
     torchrun --nnodes="$NNODES" \
          --nproc_per_node="$NPROC_PER_NODE" \
          --master_addr="$MASTER_ADDR" \
          --master_port="$MASTER_PORT" \
          --node_rank="$NODE_RANK" \
-         --tee 3 \
-         --redirects 3 \
-         --log-dir "$tr_log_dir" \
+         "${tee_args[@]}" \
          "$entry" "$TRAIN_CONFIG" \
          run_name="$RUN_NAME" \
          per_device_train_batch_size="$PER_DEVICE_BS" \

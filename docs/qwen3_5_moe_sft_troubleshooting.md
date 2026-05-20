@@ -7,7 +7,7 @@
 | 组件 | 版本 |
 |---|---|
 | Python | 3.12 |
-| PyTorch | 2.8.0+cu128 |
+| PyTorch | **2.10.0+cu128**(原 2.8.0+cu128;多机训练问题最终由 2.8.0 → 2.10.0 升级根治,见 Bug 8j) |
 | Triton | 3.4.0 |
 | CUDA | 12.8 |
 | transformers | 5.6.0 |
@@ -27,7 +27,7 @@
 | 5 | 训练 loss 计算 | OOM:`logits.float()` 试图分配 ~75 GiB | 在 `liger_kernel.py` dispatch 表里补 `qwen3_5_moe` 分支 |
 | 6 | 反向传播 | `RuntimeError: Triton >= 3.4.0 on Hopper GPUs produces incorrect results for gated chunk_bwd_dqkwg` | `pip install tilelang` |
 | 7 | step 2 forward | `CUDA error: an illegal memory access` 在 `Qwen3_5MoeSparseMoeBlock` sigmoid | dispatch 里给 qwen3_5_moe 显式 `swiglu=False, rms_norm=False`,只保留 FLCE |
-| 8 | 多机训练 | NCCL `_REDUCE_SCATTER_BASE` watchdog 超时,32 卡同步卡死,且每次重启都丢光当前 epoch 的训练 | **socket-on-eth0**(本机房 RoCE fabric 抖动是分钟级,IB 重试预算扛不住,反而 TCP 更稳) + **yaml `save_strategy: steps` + `save_steps=50`**(把单次 hang 的损失从 4h22m 压到 ~50min) + 脚本外层 auto-retry 循环。曾尝试 patch DeepSpeed 子 PG timeout 至 1800s(8d),但实测 collective 跑满 1800s 也没自愈,8g 已撤回;**8h 新增第三条通路 `NCCL_TRANSPORT=bond`**(socket-on-mlx5-bond,绕开 virtio eth0);**8i 三通路对比(eth0 / bond / RoCE)三独立协议栈同形态 hang,锁定为物理 fabric 问题,升 vendor 工单**(并修正 8h 误把 RoCE GID idx 改为 1,正确值 = 3) |
+| 8 | 多机训练 | NCCL `_REDUCE_SCATTER_BASE` watchdog 超时,32 卡同步卡死,且每次重启都丢光当前 epoch 的训练 | **最终解(8j):升级 torch 2.8.0 → 2.10.0,多机 hang 根治**。前置工程化兜底(8e–8f)仍保留作纵深防御:socket-on-eth0 + `save_strategy: steps / save_steps=50` + 脚本外层 auto-retry。曾尝试 patch DeepSpeed 子 PG timeout 至 1800s(8d),实测无效已撤回(8g);8h 新增 socket-on-bond 通路、8i 三通路对比锁定 fabric 嫌疑并准备升 vendor 工单——后被 8j 的 torch 升级一次性绕过,vendor 工单不再需要 |
 
 ---
 
@@ -912,8 +912,52 @@ bond 模式 3 步内步耗时从 103s 涨到 84s 又涨,reduce_scatter 累积更
 
 - [x] 修正 `run_sft_qwen3_5_35b_a3b_base.sh` `roce` 分支 `NCCL_IB_GID_INDEX=3`,撤销 8h 错改
 - [x] 修正 `docs/qwen3_5_moe_sft_network_transport_guide.md` 第 2 节 / 第 5 节 / 第 6.3 节 GID 索引说明
-- [ ] 按上述 smoking gun 升 vendor 工单
-- [ ] 在等供应商回复期间,**回退到 8e 的 `eth0` 通路 + auto-retry + save_steps=50** 把现有训练继续推进(eth0 即使 25min hang,save_steps=50 也只丢 ≤50 步,目前最稳的方案)
+- [x] ~~按上述 smoking gun 升 vendor 工单~~ — **8j 升级 torch 2.10.0 后 hang 不复现,工单不再需要**
+- [x] ~~在等供应商回复期间,回退到 8e 的 `eth0` 通路 + auto-retry + save_steps=50 把现有训练继续推进~~ — **由 8j 取代**
+
+### 8j 最终解:升级 torch 2.8.0 → 2.10.0,多机 hang 根治
+
+8a–8i 整段排查的工作假设是"网络层 fabric / NCCL 配置层"出问题。最终验证下来,**根因其实在 torch 自身**:把 `torch` 从 `2.8.0+cu128` 升级到 `2.10.0+cu128` 之后,4 节点 32 卡训练不再复现 `_REDUCE_SCATTER_BASE` watchdog 超时,可以稳定连续训练而不依赖 auto-retry。
+
+#### 操作
+
+```bash
+PIP=/jyx_data/jyx_data/miniconda3/envs/lf_v2/bin/pip
+$PIP install --upgrade "torch==2.10.0"
+# 同步带上 torch 生态(确认 transformers/deepspeed/fla/liger 与 2.10 兼容,
+# 必要时一并升级)
+```
+
+升级后保留的环境:Python 3.12 / CUDA 12.8 / Triton 3.4.0 / transformers 5.6.0 / fla 0.5.0 / liger-kernel 0.8.0,其它修复(Bug 1–7)以及 8e socket-on-eth0 + 8f save_steps=50 + auto-retry 循环全部保留作纵深防御。
+
+#### 验证
+
+- 4 节点 32 卡可连续训练,跨多个 epoch 边界无 `_REDUCE_SCATTER_BASE` 600s 超时
+- 单步耗时与单机 8 卡 baseline 比例正常,loss / grad_norm 数值与 8 卡 baseline 同步
+- auto-retry 没有被触发(因为没再 hang)
+
+#### 可能的机制(待进一步验证)
+
+torch 2.10.0 相对 2.8.0 在分布式栈上有若干变化,可能与本次 hang 直接相关的方向(按怀疑度排序):
+
+- **bundled NCCL 版本变化**: torch 2.8.0 内嵌 NCCL 2.27.x,torch 2.10.0 内嵌更高版本(`python -c "import torch; print(torch.cuda.nccl.version())"` 可确认)。NCCL 2.28+ 修了多起 collective hang / desync 相关 bug
+- **ProcessGroupNCCL watchdog / work tracking 重构**: 2.9–2.10 期间 PyTorch 改了 `WorkNCCL` 的入队 / 完成 / abort 路径,可能解掉某种 race
+- **Flight Recorder / FR buffer 行为变化**: 2.10 把 `TORCH_NCCL_TRACE_BUFFER_SIZE` 正式 deprecate 改为 `TORCH_FR_BUFFER_SIZE`(8 节"无害告警"已记),也意味着内部结构有所重写
+
+具体哪条是根因,8j 暂未做 bisect(`torch==2.9.0` 没单独验证)。如果未来需要在不能升到 2.10 的环境复现这个修复,可以从 NCCL 版本入手:试 `NCCL_VERSION` 单独覆盖到 torch 2.10 同款 NCCL,看是否单独够用。
+
+#### 8a–8i 的现状
+
+- **保留作为故障排查史**: 整段记录了在没有 8j 这条退路时,如何在工程层把"4–7h MTBF + 单 epoch 4h22m"的死循环逼到 ~50min 损失上限,以及如何用三通路对比把问题边界压缩到 fabric。这段思路对未来"torch 升级路径被堵 + 同样 fabric 抖动"的场景仍然有用
+- **保留代码层兜底**: 8e socket-on-eth0、8f save_steps=50 + auto-retry、`TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=1800` 不取消,理由是无副作用且未来若 torch 又回退就直接顶上
+- **8d 的 deepspeed patch 不复活**: 8g 撤回的判断在 2.10 时代仍成立——子 PG 用 vanilla 即可
+- **vendor 工单不再需要**: 8i 行动项已勾掉;但 8i 的 GID v2 索引读法(双字段联合,idx=3 才对)和拓扑笔记仍有参考价值,保留
+
+### 回归注意(8j 后)
+
+- 重装 torch 或重建镜像后**必须保留 torch ≥ 2.10**;若被迫回退到 2.8.x,Bug 8 整段大概率会原样复发,届时回到 8e+8f 的兜底方案(socket-on-eth0 + save_steps=50 + auto-retry)
+- 升级 torch 时连带升级了 NCCL,部分 NCCL 环境变量行为可能变化;首次跑 4 节点要确认健康标志(见"启动健康标志"小节)依旧全部出现
+- 不要把 8a–8i 的修复方案(`NCCL_IB_DISABLE`、`NCCL_SOCKET_NTHREADS`、auto-retry 等)在 2.10 时代全删——它们零副作用,留着对 fabric 抖动的偶发场景仍是兜底
 
 ### 无害告警(可忽略)
 
@@ -933,6 +977,10 @@ bond 模式 3 步内步耗时从 103s 涨到 84s 又涨,reduce_scatter 累积更
 
 # ---- 环境 ----
 PIP=/jyx_data/jyx_data/miniconda3/envs/lf_v2/bin/pip
+
+# (Bug 8j ★ 多机训练根治) torch 升级到 2.10 — 这是 Bug 8 整段真正的解;
+#                          升完后 8a-8i 的网络层兜底全部退化为"无副作用的纵深防御"
+$PIP install --upgrade "torch==2.10.0"
 
 # (Bug 3) fla
 $PIP install -U "flash-linear-attention>=0.4.1"
@@ -957,16 +1005,19 @@ $PIP install tilelang
 
 # ---- 启动脚本 ----
 # (Bug 2) run_sft_qwen3_5_35b_a3b_base.sh 已含 sentinel 占位符 export
+# (Bug 8j) 多机 hang 真正的解是 torch 2.10(见上面 "PIP install --upgrade torch==2.10.0").
+#         下面 8e/8f 的脚本&yaml 修改在 2.10 时代是"无副作用纵深防御",保留即可,
+#         若未来被迫回退到 torch 2.8.x 这套兜底就会立刻派上用场.
 # (Bug 8e) 同脚本 export 段最终方案: NCCL_IB_DISABLE=1 +
 #         NCCL_SOCKET_IFNAME=eth0 / GLOO_SOCKET_IFNAME=eth0 / TP_SOCKET_IFNAME=eth0 +
 #         NCCL_SOCKET_NTHREADS=8 / NCCL_NSOCKS_PERTHREAD=8 +
 #         TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=1800
-# (Bug 8d/8g) deepspeed 子 PG patch 已撤回——8g 复盘 8e 实测 1800s 也没自愈,patch 边际为负。
+# (Bug 8d/8g) deepspeed 子 PG patch 已撤回——8g 复盘 8e 实测 1800s 也没自愈,patch 边际为负.
 #   保留 vanilla:
 #     /jyx_data/jyx_data/miniconda3/envs/lf_v2/lib/python3.12/site-packages/deepspeed/comm/torch.py:373
 #     def new_group(self, ranks):
 #         return torch.distributed.new_group(ranks)
-#   未来若发现 auto-retry 后频繁链式 hang,可重新加回(默认 1200s 而非 1800s)。
+#   未来若发现 auto-retry 后频繁链式 hang,可重新加回(默认 1200s 而非 1800s).
 # (Bug 8f) yaml 改 step 级 checkpoint + 脚本 auto-retry 循环:
 #   examples/train_full/qwen3_5_35b_a3b_base_..._epo3.yaml
 #     - save_strategy: epoch
@@ -1083,4 +1134,8 @@ NNODES=4 NODE_RANK=3 bash run_sft_qwen3_5_35b_a3b_base.sh
                        deepspeed/comm/torch.py:new_group 恢复 vanilla,脚本删除
                        DEEPSPEED_PG_TIMEOUT_SEC export。依赖 600s 快速 fire +
                        auto-retry + save_steps=50 自愈。
+最终解 8j ★          torch 2.8.0 → 2.10.0 升级后,4 节点 32 卡 `_REDUCE_SCATTER_BASE`
+                       hang 不再复现,跨多个 epoch 边界连续训练稳定。8a-8i 全部退化为
+                       无副作用纵深防御(socket-on-eth0 + save_steps=50 + auto-retry),
+                       vendor 工单不再需要。
 ```
