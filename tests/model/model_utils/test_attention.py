@@ -39,6 +39,35 @@ INFER_ARGS = {
 }
 
 
+def test_flash_attention_2_s_aux_none_wrapper(monkeypatch):
+    import torch
+    from types import SimpleNamespace
+
+    import transformers.modeling_flash_attention_utils as flash_utils
+
+    from llamafactory.model.model_utils.attention import _flash_attention_forward_with_optional_s_aux
+
+    captured = {}
+
+    def fake_flash_attention_forward(query, key, value, attention_mask, **kwargs):
+        captured["s_aux"] = kwargs["s_aux"]
+        return torch.zeros_like(query)
+
+    monkeypatch.setattr(flash_utils, "_flash_attention_forward", fake_flash_attention_forward)
+    module = SimpleNamespace(
+        config=SimpleNamespace(_attn_implementation="flash_attention_2"),
+        is_causal=False,
+        layer_idx=0,
+    )
+    states = torch.zeros((1, 2, 3, 4), dtype=torch.float16)
+
+    output, weights = _flash_attention_forward_with_optional_s_aux(module, states, states, states, None, s_aux=None)
+
+    assert captured["s_aux"] is None
+    assert output.shape == (1, 3, 2, 4)
+    assert weights is None
+
+
 @pytest.mark.xfail(is_transformers_version_greater_than("4.48"), reason="Attention refactor.")
 def test_attention():
     attention_available = ["disabled"]
