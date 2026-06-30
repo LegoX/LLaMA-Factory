@@ -1,0 +1,60 @@
+### model
+model_name_or_path: /public/models/Qwen3.6-35B-A3B
+trust_remote_code: true
+
+### method
+stage: sft
+do_train: true
+do_eval: true
+finetuning_type: full
+deepspeed: examples/deepspeed/ds_z3_config.json  # choices: [ds_z0_config.json, ds_z2_config.json, ds_z3_config.json]
+
+### dataset
+dataset_dir: /public/storage/conghao/swe_data_process/production/programgen_pivot_500_deepseek_v4_pro_k8s
+dataset: programgen_pivot_500_train
+eval_dataset: programgen_pivot_500_eval
+template: qwen3_6
+cutoff_len: 262144
+packing: false
+overwrite_cache: true
+preprocessing_num_workers: 16
+dataloader_num_workers: 4
+
+### output
+output_dir: saves/qwen3_6_35b_a3b_499traj_sft
+logging_steps: 1
+save_strategy: steps
+save_steps: 10
+save_total_limit: 3
+plot_loss: true
+overwrite_output_dir: true
+save_only_model: true
+report_to: wandb  # choices: [none, wandb, tensorboard, swanlab, mlflow]
+run_name: qwen3_6_35b_a3b_499traj_sft
+
+### train
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 8
+learning_rate: 5.0e-5
+weight_decay: 0.01
+max_grad_norm: 1.0
+num_train_epochs: 3.0
+lr_scheduler_type: cosine
+warmup_ratio: 0.1
+bf16: true
+ddp_timeout: 180000000
+resume_from_checkpoint: null
+enable_liger_kernel: true
+use_unsloth_gc: true
+flash_attn: fa2
+
+### eval
+per_device_eval_batch_size: 1
+eval_strategy: steps
+eval_steps: 10
+
+# Formal run notes:
+# - train split: 454 samples; eval split: 45 samples; total filtered dataset: 499 samples
+# - full run uses all train samples (no max_samples) with cutoff_len 262144
+# - 8 GPUs, per_device_train_batch_size 1, gradient_accumulation_steps 8 => effective batch 64
+# - save_only_model: true keeps final/checkpoint model weights without optimizer state

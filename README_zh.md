@@ -526,6 +526,33 @@ pip install -r requirements/metrics.txt
 
 其他可选依赖项请参考 `examples/requirements/` 目录下的文件。
 
+#### 已验证的 `lf` Conda 环境
+
+本仓库已在名为 `lf` 的 Conda 环境中验证以下版本组合。该环境使用 Conda 的 `cuda-nvcc=12.8.93` 补齐 `nvcc`，并在激活环境时通过 `$CONDA_PREFIX` 设置 `CUDA_HOME`、`CPATH` 和 `LIBRARY_PATH`，未依赖固定安装路径。
+
+| 组件 | 版本 |
+| ---- | ---- |
+| Python | 3.12.13 |
+| PyTorch / TorchVision / TorchAudio | 2.10.0+cu128 / 0.25.0+cu128 / 2.10.0+cu128 |
+| CUDA runtime / nvcc | 12.8 / 12.8.93 |
+| Transformers / Datasets / Accelerate / PEFT / TRL | 5.6.0 / 4.0.0 / 1.11.0 / 0.18.1 / 0.24.0 |
+| DeepSpeed | 0.18.4 |
+| FlashAttention | 2.8.3.post1 |
+| Liger Kernel | 0.8.0 |
+| Flash Linear Attention / Apache TVM FFI / TileLang | 0.5.1 / 0.1.11 / 0.1.11 |
+| Weights & Biases | 0.28.0 |
+
+#### Qwen3.6 35B A3B 长上下文训练适配记录
+
+为运行 256k 上下文的全参数 SFT，本地额外做了以下适配。这里不记录模型或数据集的具体绝对路径，正式训练配置见 `examples/train_full/qwen3_6_35b_a3b_499traj_sft.yaml`。
+
+- ShareGPT 数据转换与 SFT loss 计算已支持 assistant 消息上的浮点 `loss_weight`，例如 `0`、`0.3`、`0.5`、`1`，用于让不应进入监督损失的片段只参与上下文、不贡献或少贡献 loss。
+- FlashAttention-2 路径增加了 Transformers `s_aux=None` 的兼容处理，避免 Qwen3.6 MoE 在 FA2 下因 `s_aux.to(...)` 触发空值错误。
+- 正式配置使用 `flash_attn: fa2`、DeepSpeed ZeRO-3、gradient checkpointing、`cutoff_len: 262144`、`packing: false`、`save_only_model: true`。
+- 训练集 454 条、验证集 45 条，过滤后共 499 条；正式配置移除了 smoke 的 `max_samples`，并设置 `num_train_epochs: 3.0`。
+- 已做 256k 单步压力测试：8 卡、每卡 batch 1、FA2 + ZeRO-3 + gradient checkpointing 可以跑通；峰值显存约 128 GiB/卡，单卡剩余约 15 GiB，因此正式训练保持 `per_device_train_batch_size: 1`。
+- API 测评可在训练完成后使用 `llamafactory-cli api` 和 vLLM 后端启动 OpenAI 风格服务，测评端调用 `/v1/chat/completions`。
+
 #### 从镜像安装
 
 ```bash
