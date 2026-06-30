@@ -62,3 +62,19 @@ def test_sharegpt_converter():
         "_videos": None,
         "_audios": None,
     }
+
+
+@pytest.mark.runs_on(["cpu", "mps"])
+def test_sharegpt_converter_loss_weight():
+    dataset_attr = DatasetAttr("hf_hub", "llamafactory/tiny-supervised-dataset")
+    data_args = DataArguments()
+    example = {
+        "conversations": [
+            {"from": "human", "value": "Do the safe thing."},
+            {"from": "gpt", "value": "Safe response.", "loss_weight": 0.5},
+        ]
+    }
+    dataset_converter = get_dataset_converter("sharegpt", dataset_attr, data_args)
+    assert dataset_converter(example)["_response"] == [
+        {"role": Role.ASSISTANT.value, "content": "Safe response.", "loss_weight": 0.5}
+    ]

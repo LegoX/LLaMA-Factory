@@ -19,8 +19,12 @@ import pytest
 from datasets import load_dataset
 from transformers import AutoTokenizer
 
+from llamafactory.data import get_template_and_fix_tokenizer
+from llamafactory.data.processor.supervised import SupervisedDatasetProcessor
 from llamafactory.extras.constants import IGNORE_INDEX
 from llamafactory.extras.packages import is_transformers_version_greater_than
+from llamafactory.hparams import get_infer_args
+from llamafactory.model import load_tokenizer
 from llamafactory.train.test_utils import load_dataset_module
 
 
@@ -88,6 +92,58 @@ def test_supervised_multi_turn(num_samples: int):
 
         # cannot test the label ids in multi-turn case
         assert train_dataset["input_ids"][index] == ref_input_ids
+
+
+@pytest.mark.runs_on(["cpu", "mps"])
+def test_supervised_loss_weights():
+    model_args, data_args, *_ = get_infer_args(
+        {"model_name_or_path": TINY_LLAMA3, "template": "llama3", "cutoff_len": 8192}
+    )
+    tokenizer_module = load_tokenizer(model_args)
+    tokenizer = tokenizer_module["tokenizer"]
+    template = get_template_and_fix_tokenizer(tokenizer, data_args)
+    processor = SupervisedDatasetProcessor(
+        template=template,
+        tokenizer=tokenizer,
+        processor=tokenizer_module.get("processor"),
+        data_args=data_args,
+    )
+    model_inputs = processor.preprocess_dataset(
+        {
+            "_prompt": [
+                [
+                    {"role": "user", "content": "First request."},
+                    {"role": "assistant", "content": "Weighted answer.", "loss_weight": 0.5},
+                    {"role": "user", "content": "Second request."},
+                ]
+            ],
+            "_response": [[{"role": "assistant", "content": "Masked answer.", "loss_weight": 0.0}]],
+            "_system": [""],
+            "_tools": [""],
+            "_images": [None],
+            "_videos": [None],
+            "_audios": [None],
+        }
+    )
+    example = {key: value[0] for key, value in model_inputs.items()}
+    assert len(example["loss_weights"]) == len(example["input_ids"]) == len(example["labels"])
+    assert all(
+        weight == 0.0
+        for label, weight in zip(example["labels"], example["loss_weights"])
+        if label == IGNORE_INDEX
+    )
+
+    valid_weights = [
+        round(float(weight), 2)
+        for label, weight in zip(example["labels"], example["loss_weights"])
+        if label != IGNORE_INDEX
+    ]
+    assert valid_weights
+    assert set(valid_weights) == {0.5}
+
+    decoded_labels = tokenizer.decode([label for label in example["labels"] if label != IGNORE_INDEX])
+    assert "Weighted answer" in decoded_labels
+    assert "Masked answer" not in decoded_labels
 
 
 @pytest.mark.runs_on(["cpu", "mps"])

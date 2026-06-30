@@ -45,6 +45,41 @@ if TYPE_CHECKING:
 logger = logging.get_logger(__name__)
 
 
+def _get_output_value(outputs: Union[dict[str, Any], Any], key: str) -> Any:
+    if isinstance(outputs, dict):
+        return outputs.get(key)
+
+    return getattr(outputs, key, None)
+
+
+def _compute_weighted_loss(outputs: Union[dict[str, Any], Any], labels: "torch.Tensor", loss_weights: "torch.Tensor"):
+    logits = _get_output_value(outputs, "logits")
+    if logits is None:
+        loss = _get_output_value(outputs, "loss")
+        if loss is None:
+            return torch.tensor(0.0, device=labels.device)
+
+        return loss
+
+    logits = logits.float()
+    shift_logits = logits[..., :-1, :].contiguous()
+    shift_labels = labels[..., 1:].contiguous().to(shift_logits.device)
+    shift_weights = loss_weights[..., 1:].contiguous().to(device=shift_logits.device, dtype=shift_logits.dtype)
+    vocab_size = shift_logits.size(-1)
+    per_token_loss = torch.nn.functional.cross_entropy(
+        shift_logits.view(-1, vocab_size),
+        shift_labels.view(-1),
+        ignore_index=IGNORE_INDEX,
+        reduction="none",
+    ).view_as(shift_labels)
+    valid_weights = shift_weights * (shift_labels != IGNORE_INDEX).to(shift_weights.dtype)
+    denom = valid_weights.sum()
+    if denom <= 0:
+        return per_token_loss.sum() * 0.0
+
+    return (per_token_loss * valid_weights).sum() / denom
+
+
 class CustomSeq2SeqTrainer(Seq2SeqTrainer):
     r"""Inherits Seq2SeqTrainer to compute generative metrics such as BLEU and ROUGE."""
 
@@ -150,6 +185,7 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
 
     @override
     def compute_loss(self, model, inputs, *args, **kwargs):
+        loss_weights = inputs.pop("loss_weights", None)
         if self.finetuning_args.use_asft_loss:
             with torch.no_grad():
                 ref_outputs = self.ref_model(
@@ -159,6 +195,10 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
                 ref_logits = ref_outputs.logits
             outputs = model(**inputs)
             return self.compute_loss_func(outputs, inputs["labels"], ref_logits)
+        elif loss_weights is not None and not (self.finetuning_args.use_dft_loss or self.finetuning_args.use_eaft_loss):
+            outputs = model(**inputs)
+            loss = _compute_weighted_loss(outputs, inputs["labels"], loss_weights)
+            return (loss, outputs) if kwargs.get("return_outputs", False) else loss
         else:
             return super().compute_loss(model, inputs, *args, **kwargs)
 
@@ -176,6 +216,7 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
         Subclass and override to inject custom behavior.
         """
         if self.args.predict_with_generate:  # do not pass labels to model when generate
+            inputs.pop("loss_weights", None)
             labels = inputs.pop("labels", None)
         else:
             labels = inputs.get("labels")

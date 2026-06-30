@@ -77,6 +77,41 @@ def test_base_collator():
 
 
 @pytest.mark.runs_on(["cpu", "mps"])
+def test_collator_pads_loss_weights():
+    model_args, data_args, *_ = get_infer_args({"model_name_or_path": TINY_LLAMA3, "template": "default"})
+    tokenizer_module = load_tokenizer(model_args)
+    template = get_template_and_fix_tokenizer(tokenizer_module["tokenizer"], data_args)
+    data_collator = MultiModalDataCollatorForSeq2Seq(
+        template=template,
+        pad_to_multiple_of=8,
+        label_pad_token_id=IGNORE_INDEX,
+        **tokenizer_module,
+    )
+    features = [
+        {
+            "input_ids": [0, 1, 2, 3, 4, 5],
+            "attention_mask": [1, 1, 1, 1, 1, 1],
+            "labels": [IGNORE_INDEX, IGNORE_INDEX, 2, 3, 4, 5],
+            "loss_weights": [0.0, 0.0, 1.0, 0.5, 0.5, 1.0],
+        },
+        {
+            "input_ids": [6, 7],
+            "attention_mask": [1, 1],
+            "labels": [IGNORE_INDEX, 7],
+            "loss_weights": [0.0, 0.3],
+        },
+    ]
+    batch_input = data_collator(features)
+    expected_loss_weights = torch.tensor(
+        [
+            [0.0, 0.0, 1.0, 0.5, 0.5, 1.0, 0.0, 0.0],
+            [0.0, 0.3, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        ]
+    )
+    assert batch_input["loss_weights"].eq(expected_loss_weights).all()
+
+
+@pytest.mark.runs_on(["cpu", "mps"])
 def test_multimodal_collator():
     model_args, data_args, *_ = get_infer_args(
         {"model_name_or_path": "Qwen/Qwen2-VL-2B-Instruct", "template": "qwen2_vl"}

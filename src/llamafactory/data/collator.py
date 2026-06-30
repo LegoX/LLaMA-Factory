@@ -324,8 +324,11 @@ class MultiModalDataCollatorForSeq2Seq(DataCollatorForSeq2Seq):
     def __call__(self, features: list[dict[str, Any]]) -> dict[str, "torch.Tensor"]:
         batch_images, batch_videos, batch_audios = [], [], []
         batch_imglens, batch_vidlens, batch_audlens, batch_input_ids = [], [], [], []
+        has_loss_weights = any("loss_weights" in feature for feature in features)
+        batch_loss_weights: list[list[float]] = []
         packing_params_list: list[dict[str, Any] | None] = []
         for feature in features:
+            loss_weights = feature.pop("loss_weights", None)
             images = feature.pop("images", None) or []
             videos = feature.pop("videos", None) or []
             audios = feature.pop("audios", None) or []
@@ -336,6 +339,14 @@ class MultiModalDataCollatorForSeq2Seq(DataCollatorForSeq2Seq):
             batch_vidlens.append(len(videos))
             batch_audlens.append(len(audios))
             batch_input_ids.append(feature["input_ids"])
+            if has_loss_weights:
+                if loss_weights is None:
+                    loss_weights = [1.0 if label != IGNORE_INDEX else 0.0 for label in feature["labels"]]
+                if len(loss_weights) != len(feature["input_ids"]):
+                    raise ValueError("`loss_weights` must have the same length as `input_ids`.")
+
+                batch_loss_weights.append([float(weight) for weight in loss_weights])
+
             packing_params_list.append(feature.pop("packing_params", None))
 
         fake_input_ids = []
@@ -378,10 +389,14 @@ class MultiModalDataCollatorForSeq2Seq(DataCollatorForSeq2Seq):
                 features[0]["input_ids"] = features[0]["input_ids"] + fake_input_ids
                 features[0]["attention_mask"] = features[0]["attention_mask"] + [0] * len(fake_input_ids)
                 features[0]["labels"] = features[0]["labels"] + [IGNORE_INDEX] * len(fake_input_ids)
+                if has_loss_weights:
+                    batch_loss_weights[0] = batch_loss_weights[0] + [0.0] * len(fake_input_ids)
             else:
                 features[0]["input_ids"] = fake_input_ids + features[0]["input_ids"]
                 features[0]["attention_mask"] = [0] * len(fake_input_ids) + features[0]["attention_mask"]
                 features[0]["labels"] = [IGNORE_INDEX] * len(fake_input_ids) + features[0]["labels"]
+                if has_loss_weights:
+                    batch_loss_weights[0] = [0.0] * len(fake_input_ids) + batch_loss_weights[0]
 
             batch_input_ids[0] = features[0]["input_ids"]
 
@@ -414,6 +429,20 @@ class MultiModalDataCollatorForSeq2Seq(DataCollatorForSeq2Seq):
             mm_inputs["mm_token_type_ids"] = torch.tensor(padded, dtype=torch.long)
 
         features: dict[str, torch.Tensor] = super().__call__(features)
+        if has_loss_weights:
+            padded_loss_weights = []
+            seq_len = features["input_ids"].size(1)
+            for loss_weights in batch_loss_weights:
+                pad_len = seq_len - len(loss_weights)
+                if pad_len < 0:
+                    raise ValueError("`loss_weights` length exceeds the padded input length.")
+
+                if self.tokenizer.padding_side == "right":
+                    padded_loss_weights.append(loss_weights + [0.0] * pad_len)
+                else:
+                    padded_loss_weights.append([0.0] * pad_len + loss_weights)
+
+            features["loss_weights"] = torch.tensor(padded_loss_weights, dtype=torch.float32)
 
         bsz, seq_len = features["input_ids"].shape[:2]
         model_type = getattr(self.model.config, "model_type", None) if self.model is not None else None

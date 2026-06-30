@@ -17,12 +17,14 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
+import torch
 from transformers import DataCollatorWithPadding
 
 from llamafactory.data import get_dataset, get_template_and_fix_tokenizer
+from llamafactory.extras.constants import IGNORE_INDEX
 from llamafactory.hparams import get_train_args
 from llamafactory.model import load_model, load_tokenizer
-from llamafactory.train.sft.trainer import CustomSeq2SeqTrainer
+from llamafactory.train.sft.trainer import CustomSeq2SeqTrainer, _compute_weighted_loss
 
 
 DEMO_DATA = os.getenv("DEMO_DATA", "llamafactory/demo_data")
@@ -57,6 +59,32 @@ class DataCollatorWithVerbose(DataCollatorWithPadding):
         self.verbose_list.extend(features)
         batch = super().__call__(features)
         return {k: v[:, :1] for k, v in batch.items()}  # truncate input length
+
+
+def test_compute_weighted_loss():
+    logits = torch.tensor(
+        [
+            [
+                [0.0, 2.0, -1.0],
+                [0.0, -1.0, 2.0],
+                [0.0, 2.0, -1.0],
+                [2.0, 0.0, -1.0],
+            ]
+        ]
+    )
+    labels = torch.tensor([[IGNORE_INDEX, 1, 2, 1]])
+    loss_weights = torch.tensor([[0.0, 1.0, 0.5, 0.0]])
+    loss = _compute_weighted_loss({"logits": logits}, labels, loss_weights)
+
+    per_token_loss = torch.nn.functional.cross_entropy(
+        logits[:, :-1, :].reshape(-1, logits.size(-1)),
+        labels[:, 1:].reshape(-1),
+        ignore_index=IGNORE_INDEX,
+        reduction="none",
+    )
+    expected_weights = torch.tensor([1.0, 0.5, 0.0])
+    expected = (per_token_loss * expected_weights).sum() / expected_weights.sum()
+    assert torch.allclose(loss, expected)
 
 
 @pytest.mark.parametrize("disable_shuffling", [False, True])
