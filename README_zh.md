@@ -551,7 +551,39 @@ pip install -r requirements/metrics.txt
 - 正式配置使用 `flash_attn: fa2`、DeepSpeed ZeRO-3、gradient checkpointing、`cutoff_len: 262144`、`packing: false`、`save_only_model: true`。
 - 训练集 454 条、验证集 45 条，过滤后共 499 条；正式配置移除了 smoke 的 `max_samples`，并设置 `num_train_epochs: 3.0`。
 - 已做 256k 单步压力测试：8 卡、每卡 batch 1、FA2 + ZeRO-3 + gradient checkpointing 可以跑通；峰值显存约 128 GiB/卡，单卡剩余约 15 GiB，因此正式训练保持 `per_device_train_batch_size: 1`。
-- API 测评可在训练完成后使用 `llamafactory-cli api` 和 vLLM 后端启动 OpenAI 风格服务，测评端调用 `/v1/chat/completions`。
+- API 测评建议使用 SGLang 的 OpenAI-compatible 服务，测评端调用 `/v1/chat/completions`。
+
+SGLang serving 建议使用接近 Qwen3.6 官方 tool-use 的配置，但不要启用 `--reasoning-parser qwen3`。这样会保留模型的 thinking 输出，并让 thinking 留在 `message.content` 中；同时 `qwen3_coder` tool-call parser 仍可解析标准工具调用为 top-level `tool_calls`。该设置可避免 OpenHands 收到 `content` 为空、`tool_calls` 为空、只有 `reasoning_content` 的 assistant message 后判定 no-op / stuck。
+
+示例命令如下。这里使用环境变量占位，不记录本机具体路径。
+
+```bash
+export SGLANG_ENV=/path/to/sglang/env
+export QWEN36_MODEL_DIR=/path/to/Qwen3.6-35B-A3B
+
+SGLANG_NUMA_BIND_V2=0 \
+PATH="$SGLANG_ENV/bin:$PATH" \
+sglang serve \
+  --model-path "$QWEN36_MODEL_DIR" \
+  --trust-remote-code \
+  --served-model-name qwen3_6_35b_a3b_base_sglang \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --tensor-parallel-size 8 \
+  --context-length 262144 \
+  --mem-fraction-static 0.8 \
+  --tool-call-parser qwen3_coder \
+  --chat-template "$QWEN36_MODEL_DIR/chat_template.jinja"
+```
+
+说明：
+
+- `--reasoning-parser qwen3` 有意不设置；否则 SGLang 会把 thinking 拆到 `reasoning_content`，在部分 OpenHands / LiteLLM 链路中可能形成无 action 的 assistant message。
+- `--tool-call-parser qwen3_coder` 保留，用于把 Qwen XML 风格工具调用解析成 OpenAI `tool_calls`。
+- `--chat-template` 显式指向模型自带模板，避免 serving 框架自动识别模板时出现差异。
+- `SGLANG_NUMA_BIND_V2=0` 用于避开部分机器上 `numactl --membind` 失败导致 scheduler 初始化退出的问题。
+- `PATH="$SGLANG_ENV/bin:$PATH"` 确保 FlashInfer JIT 等组件可以找到 `ninja` 等环境内工具。
+- 不需要手动设置 `--fp8-gemm-backend` 或 `--moe-runner-backend`；默认 `auto` 即可。
 
 #### 从镜像安装
 
