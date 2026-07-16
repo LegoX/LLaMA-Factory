@@ -3,36 +3,36 @@
 # 用法示例:
 #
 # 1) 单节点 8 卡:
-#   cd /jyx_data/LLaMA-Factory-latest
+#   cd /path/to/LLaMA-Factory
 #   bash run_sft_qwen3_5_35b_a3b_base.sh
 #
 # 2) 两节点各 8 卡(推荐显式指定 node0 可被 node1 访问的 IP):
 #   # node0
-#   cd /jyx_data/LLaMA-Factory-latest
+#   cd /path/to/LLaMA-Factory
 #   NNODES=2 NODE_RANK=0 bash run_sft_qwen3_5_35b_a3b_base.sh
 #
 #   # node1
-#   cd /jyx_data/LLaMA-Factory-latest
+#   cd /path/to/LLaMA-Factory
 #   NNODES=2 NODE_RANK=1 bash run_sft_qwen3_5_35b_a3b_base.sh
 #
 # 3) 四节点各 8 卡:
 #   # node0
-#   cd /jyx_data/LLaMA-Factory-latest
+#   cd /path/to/LLaMA-Factory
 #   NNODES=4 NODE_RANK=0 bash run_sft_qwen3_5_35b_a3b_base.sh
 #
 #   # node1
-#   cd /jyx_data/LLaMA-Factory-latest
+#   cd /path/to/LLaMA-Factory
 #   NNODES=4 NODE_RANK=1 bash run_sft_qwen3_5_35b_a3b_base.sh
 #
 #   # node2
-#   cd /jyx_data/LLaMA-Factory-latest
+#   cd /path/to/LLaMA-Factory
 #   NNODES=4 NODE_RANK=2 bash run_sft_qwen3_5_35b_a3b_base.sh
 #
 #   # node3
-#   cd /jyx_data/LLaMA-Factory-latest
+#   cd /path/to/LLaMA-Factory
 #   NNODES=4 NODE_RANK=3 bash run_sft_qwen3_5_35b_a3b_base.sh
 #
-#   # 若 /jyx_data/LLaMA-Factory-latest 不是四节点共享目录,建议四台机器显式传同一个 MASTER_ADDR=<node0_ip>。
+#   # 若仓库目录不是四节点共享目录,建议四台机器显式传同一个 MASTER_ADDR=<node0_ip>。
 #
 # 说明:
 # - 启动前需 export WANDB_API_KEY=xxx (脚本不再内置默认值)。
@@ -48,12 +48,16 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 cd "$SCRIPT_DIR"
 
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
-export WANDB_API_KEY=${WANDB_API_KEY:-b8d8f033fb501a01c5ef0e04f304e3976016e737}
+if [ -z "${WANDB_API_KEY:-}" ]; then
+    echo "[error] WANDB_API_KEY is required; export it before starting training." >&2
+    exit 1
+fi
+export WANDB_API_KEY
 
 # === 诊断仪表 ===
-# 8j(torch 2.8 → 2.10 升级)之后 4 节点训练稳定,5/18 供应商升单时打开的全 traceback
-# 仪表(NCCL INFO、TRACE_STAGES、TORCH_CPP_LOG_LEVEL=INFO、TRANSFORMERS=info 等)默认关闭。
-# DEBUG_HANG=1 一键切回 5/18 那套排查模式;留作未来 fabric 再退化或 torch 被迫回退时的应急。
+# torch 2.10 升级之后 4 节点训练稳定;完整 traceback 诊断仪表
+# (NCCL INFO、TRACE_STAGES、TORCH_CPP_LOG_LEVEL=INFO、TRANSFORMERS=info 等)默认关闭。
+# DEBUG_HANG=1 一键切回排查模式,留作未来 fabric 再退化或 torch 被迫回退时的应急。
 DEBUG_HANG=${DEBUG_HANG:-0}
 
 if [ "$DEBUG_HANG" = "1" ]; then

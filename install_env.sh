@@ -7,7 +7,7 @@
 #   - docs/qwen3_5_moe_sft_troubleshooting.md      (7+1 个 bug 的修复 / "整体修复清单")
 #
 # 覆盖的 bug:
-#   Bug 3  flash-linear-attention>=0.4.1   (pip)
+#   Bug 3  flash-linear-attention==0.5.0   (默认值,可通过 FLA_VERSION 覆盖)
 #   Bug 4  transformers FA2 s_aux=None     (site-packages 一行补丁,本脚本自动打)
 #   Bug 5  liger qwen3_5_moe dispatch      (已在仓库源码,pip install -e . 自动生效)
 #   Bug 6  tilelang                        (pip,Hopper + Triton>=3.4 反向所需)
@@ -33,6 +33,10 @@ TORCH_VERSION="${TORCH_VERSION:-2.10.0}"
 TORCHVISION_VERSION="${TORCHVISION_VERSION:-0.25.0}"
 TORCHAUDIO_VERSION="${TORCHAUDIO_VERSION:-2.10.0}"
 TORCH_INDEX_URL="${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu128}"
+PYPI_INDEX_URL="${PYPI_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
+TRANSFORMERS_VERSION="${TRANSFORMERS_VERSION:-5.6.0}"
+FLA_VERSION="${FLA_VERSION:-0.5.0}"
+FSSPEC_VERSION="${FSSPEC_VERSION:-2025.3.0}"
 
 log()  { printf '\033[1;32m[install_env]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[install_env]\033[0m %s\n' "$*" >&2; }
@@ -90,36 +94,48 @@ $PIP install \
 #    (Bug 5 / Bug 7 的 liger dispatch 补丁已在仓库源码里,-e 安装自动生效)
 # ----------------------------------------------------------------------------
 log "安装 LlamaFactory (editable) ..."
-$PIP install -e .
+$PIP install --index-url "$PYPI_INDEX_URL" -e .
 
 log "安装 requirements (metrics / deepspeed / liger-kernel) ..."
-$PIP install -r requirements/metrics.txt
-$PIP install -r requirements/deepspeed.txt
-$PIP install -r requirements/liger-kernel.txt
+$PIP install --index-url "$PYPI_INDEX_URL" -r requirements/metrics.txt
+$PIP install --index-url "$PYPI_INDEX_URL" -r requirements/deepspeed.txt
+$PIP install --index-url "$PYPI_INDEX_URL" -r requirements/liger-kernel.txt
 
 # ----------------------------------------------------------------------------
 # 5. flash-attn (FA2)
 # ----------------------------------------------------------------------------
 log "安装 flash-attn (--no-build-isolation,编译较慢) ..."
-$PIP install flash-attn --no-build-isolation
+$PIP install \
+    --index-url "$PYPI_INDEX_URL" \
+    flash-attn \
+    --no-build-isolation
 
 # ----------------------------------------------------------------------------
-# 6. 实验追踪
+# 6. Qwen3.5 linear-attention 依赖与版本纠偏
+#    直接依赖已由 LlamaFactory 安装。这里使用 --no-deps,避免把 CUDA 12.8
+#    的 PyTorch 替换成 PyPI 上其它 CUDA 版本,也避免 transformers 漂移。
 # ----------------------------------------------------------------------------
-log "安装 wandb ..."
-$PIP install wandb
+log "固定 transformers / flash-linear-attention / fsspec 版本 ..."
+$PIP install \
+    --index-url "$PYPI_INDEX_URL" \
+    --no-deps \
+    --upgrade \
+    "flash-linear-attention==$FLA_VERSION" \
+    "fla-core==$FLA_VERSION" \
+    "transformers==$TRANSFORMERS_VERSION" \
+    "fsspec==$FSSPEC_VERSION"
 
 # ----------------------------------------------------------------------------
-# 7. Bug 3: flash-linear-attention (Qwen3.5 linear-attention 层依赖)
-# ----------------------------------------------------------------------------
-log "安装 flash-linear-attention>=0.4.1 (Bug 3) ..."
-$PIP install -U "flash-linear-attention>=0.4.1"
-
-# ----------------------------------------------------------------------------
-# 8. Bug 6: tilelang (Hopper + Triton>=3.4 上 gated_delta_rule 反向必需)
+# 7. Bug 6: tilelang (Hopper + Triton>=3.4 上 gated_delta_rule 反向必需)
 # ----------------------------------------------------------------------------
 log "安装 tilelang (Bug 6) ..."
-$PIP install tilelang
+$PIP install --index-url "$PYPI_INDEX_URL" tilelang
+
+# ----------------------------------------------------------------------------
+# 8. 实验追踪
+# ----------------------------------------------------------------------------
+log "安装 wandb ..."
+$PIP install --index-url "$PYPI_INDEX_URL" wandb
 
 # ----------------------------------------------------------------------------
 # 9. Bug 4: transformers FA2 s_aux=None 解引用补丁
@@ -156,31 +172,67 @@ PYEOF
 # ----------------------------------------------------------------------------
 # 10. 校验
 # ----------------------------------------------------------------------------
+log "检查 Python 包依赖一致性 ..."
+$PIP check
+
 log "环境自检 ..."
+EXPECTED_TORCH_VERSION="$TORCH_VERSION" \
+EXPECTED_TRANSFORMERS_VERSION="$TRANSFORMERS_VERSION" \
+EXPECTED_FLA_VERSION="$FLA_VERSION" \
+EXPECTED_FSSPEC_VERSION="$FSSPEC_VERSION" \
 "$PYBIN" - <<'PYEOF'
 import importlib
-def ver(mod):
-    try:
-        m = importlib.import_module(mod)
-        return getattr(m, "__version__", "ok")
-    except Exception as e:
-        return f"MISSING ({e.__class__.__name__})"
+import os
 
-print(f"  torch                  : {ver('torch')}")
 import torch
+
+
+def version(module):
+    imported = importlib.import_module(module)
+    return getattr(imported, "__version__", "ok")
+
+
+modules = [
+    ("transformers", "transformers"),
+    ("llamafactory", "llamafactory"),
+    ("flash_attn", "flash_attn"),
+    ("fla (flash-linear-attention)", "fla"),
+    ("fsspec", "fsspec"),
+    ("liger_kernel", "liger_kernel"),
+    ("tilelang", "tilelang"),
+    ("deepspeed", "deepspeed"),
+    ("wandb", "wandb"),
+]
+versions = {"torch": torch.__version__}
+
+print(f"  torch                  : {torch.__version__}")
 print(f"  torch.cuda.is_available: {torch.cuda.is_available()}")
 try:
     print(f"  bundled NCCL           : {torch.cuda.nccl.version()}")
 except Exception:
     pass
-print(f"  transformers           : {ver('transformers')}")
-print(f"  llamafactory           : {ver('llamafactory')}")
-print(f"  flash_attn             : {ver('flash_attn')}")
-print(f"  fla (flash-lin-attn)   : {ver('fla')}")
-print(f"  liger_kernel           : {ver('liger_kernel')}")
-print(f"  tilelang               : {ver('tilelang')}")
-print(f"  deepspeed              : {ver('deepspeed')}")
-print(f"  wandb                  : {ver('wandb')}")
+for label, module in modules:
+    versions[module] = version(module)
+    print(f"  {label:<23}: {versions[module]}")
+
+expected = {
+    "torch": os.environ["EXPECTED_TORCH_VERSION"],
+    "transformers": os.environ["EXPECTED_TRANSFORMERS_VERSION"],
+    "fla": os.environ["EXPECTED_FLA_VERSION"],
+    "fsspec": os.environ["EXPECTED_FSSPEC_VERSION"],
+}
+actual_torch = versions["torch"].split("+", 1)[0]
+if actual_torch != expected["torch"]:
+    raise RuntimeError(f"torch version drift: expected {expected['torch']}, got {versions['torch']}")
+for module in ("transformers", "fla", "fsspec"):
+    if versions[module] != expected[module]:
+        raise RuntimeError(
+            f"{module} version drift: expected {expected[module]}, got {versions[module]}"
+        )
+
+# 导入执行 LLaMA-Factory 依赖版本检查的解析器路径。
+importlib.import_module("llamafactory.hparams")
+print("  LLaMA-Factory dependency check: OK")
 PYEOF
 
 log "完成 ✅  环境 '$ENV_NAME' 已就绪。"

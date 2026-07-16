@@ -5,8 +5,8 @@ resume, retry, and per-file commit. Combined with hf_transfer for multi-part
 parallel PUT on the LFS path.
 
 Notes:
-- HuggingFace's Xet backend (cas-server.xethub.hf.co) is NOT regionally distributed —
-  from Singapore/APAC the connect RTT is 280ms+, causing xorb uploads to timeout.
+- HuggingFace's Xet backend (cas-server.xethub.hf.co) can have high latency in
+  some regions, causing xorb uploads to timeout.
   HF_HUB_DISABLE_XET=1 forces the legacy LFS path which goes through regional PoPs.
 - hf_transfer accelerates LFS uploads via Rust multi-part parallel PUT. It is only
   deprecated for the Xet path; for LFS it still works and helps significantly.
@@ -20,7 +20,7 @@ import os
 import sys
 from pathlib import Path
 
-# Force legacy LFS path — Xet's CAS server has terrible latency from APAC.
+# Force the legacy LFS path when Xet's CAS server has high regional latency.
 os.environ["HF_HUB_DISABLE_XET"] = "1"
 # hf_transfer accelerates LFS uploads via multi-part parallel PUT.
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
@@ -34,9 +34,9 @@ from huggingface_hub import HfApi  # noqa: E402
 # ──────────────────────────────────────────────────────────────────────────────
 # Defaults — overridable via CLI args
 # ──────────────────────────────────────────────────────────────────────────────
-DEFAULT_CKPT_DIR = "/jyx_data/LLaMA-Factory-latest/saves/qwen3_5_35b_a3b_base_pangu_code_data_0417_gbs64pbs1acc8_lr5e-5_epo3"
-DEFAULT_REPO_ID = "SWE-Lego/qwen3_5_35b_a3b_base_pangu_code_data_0417_gbs64pbs1acc8_lr5e-5_epo3"
-DEFAULT_TOKEN = "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"
+DEFAULT_CKPT_DIR = os.environ.get("CKPT_DIR")
+DEFAULT_REPO_ID = os.environ.get("HF_REPO_ID")
+DEFAULT_TOKEN = os.environ.get("HF_TOKEN")
 DEFAULT_MAX_SHARD_SIZE = "5GB"
 DEFAULT_NUM_WORKERS = 16
 # ──────────────────────────────────────────────────────────────────────────────
@@ -58,14 +58,21 @@ IGNORE_PATTERNS = [
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Upload model checkpoint to Hugging Face")
-    p.add_argument("ckpt_dir", nargs="?", default=DEFAULT_CKPT_DIR, help="Local checkpoint directory")
-    p.add_argument("repo_id", nargs="?", default=DEFAULT_REPO_ID, help="HF repo id (org/name)")
-    p.add_argument("--token", default=DEFAULT_TOKEN, help="HF API token")
+    p.add_argument("ckpt_dir", nargs="?", default=DEFAULT_CKPT_DIR, help="Local checkpoint directory (or CKPT_DIR)")
+    p.add_argument("repo_id", nargs="?", default=DEFAULT_REPO_ID, help="HF repo id (org/name, or HF_REPO_ID)")
+    p.add_argument("--token", default=DEFAULT_TOKEN, help="HF API token (defaults to HF_TOKEN)")
     p.add_argument("--max-shard-size", default=DEFAULT_MAX_SHARD_SIZE, help="Max shard size (e.g. 5GB)")
     p.add_argument("--num-workers", type=int, default=DEFAULT_NUM_WORKERS, help="Number of upload workers")
     p.add_argument("--private", action="store_true", default=True, help="Create private repo (default)")
     p.add_argument("--public", action="store_true", help="Create public repo")
-    return p.parse_args()
+    args = p.parse_args()
+    if not args.ckpt_dir:
+        p.error("ckpt_dir is required (pass it as an argument or set CKPT_DIR)")
+    if not args.repo_id:
+        p.error("repo_id is required (pass it as an argument or set HF_REPO_ID)")
+    if not args.token:
+        p.error("a Hugging Face token is required (pass --token or set HF_TOKEN)")
+    return args
 
 
 def reshard_if_needed(src_dir: str, max_shard_size: str) -> str:

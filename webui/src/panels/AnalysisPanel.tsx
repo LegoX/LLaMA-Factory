@@ -30,7 +30,7 @@ interface Report {
   isDemo?: boolean;
 }
 
-const REPORTS_KEY = "harbor-rl-reports";
+const REPORTS_KEY = "swe-lego-live-sft-reports";
 
 const RECO_PATTERNS = [
   /^#{1,3}\s*\d*\.?\s*Top[- ]Priority Recommendations/im,

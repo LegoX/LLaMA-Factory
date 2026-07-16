@@ -126,7 +126,7 @@ ImportError: Qwen3.5 packing-seq forwarding requires flash-linear-attention>=0.4
 ### 修复
 
 ```bash
-/jyx_data/jyx_data/miniconda3/envs/lf_v2/bin/pip install -U "flash-linear-attention>=0.4.1"
+python -m pip install -U "flash-linear-attention>=0.4.1"
 ```
 
 实际装入 `flash_linear_attention 0.5.0` + `fla_core 0.5.0`。
@@ -155,7 +155,7 @@ AttributeError: 'NoneType' object has no attribute 'to'
 最小一行补丁:
 
 ```python
-# /jyx_data/jyx_data/miniconda3/envs/lf_v2/lib/python3.12/site-packages/transformers/integrations/flash_attention.py:84
+# <python-env>/site-packages/transformers/integrations/flash_attention.py:84
 s_aux=s_aux.to(query.dtype) if s_aux is not None else None,  # FA only accepts half precision
 ```
 
@@ -248,7 +248,7 @@ issue #640 报告 H20 + Triton 3.5 上 `dg`/`db`/`dk` 反向梯度精度异常(e
 ### 修复
 
 ```bash
-/jyx_data/jyx_data/miniconda3/envs/lf_v2/bin/pip install tilelang
+python -m pip install tilelang
 ```
 
 实际装入 `tilelang 0.1.9` + `apache-tvm-ffi 0.1.11` + `cloudpickle 3.1.2` + `ml-dtypes 0.5.4` + `torch-c-dlpack-ext 0.1.5` + `z3-solver 4.15.4.0`,无版本冲突。
@@ -427,7 +427,7 @@ for f in /sys/class/infiniband/*/ports/*/gid_attrs/types/*; do
 done
 ```
 
-本机器探测结论(`/jyx_data/LLaMA-Factory-latest/sysfs_output.txt`,`/jyx_data/LLaMA-Factory-latest/ib_detect_output.txt`):
+示例节点探测结论(原始探测输出不纳入仓库):
 
 | 项 | 实测 |
 |---|---|
@@ -473,7 +473,7 @@ export TORCH_NCCL_DUMP_ON_TIMEOUT=${TORCH_NCCL_DUMP_ON_TIMEOUT:-1}
 export TORCH_NCCL_DESYNC_DEBUG=${TORCH_NCCL_DESYNC_DEBUG:-1}
 ```
 
-参考脚本:`/jyx_data/harbor-verl-train-yt/scripts/fully_async_2nodes_multilingual.sh` 里 `NCCL_SOCKET_IFNAME=eth0 / GLOO_SOCKET_IFNAME=eth0` 三行写法对齐。
+该配置与常见多节点脚本中 `NCCL_SOCKET_IFNAME=eth0 / GLOO_SOCKET_IFNAME=eth0` 的写法一致。
 
 ### 易踩坑(避免回退)
 
@@ -490,7 +490,7 @@ NCCL version 2.27.3+cuda12.9
 NET/Plugin: Loaded net plugin NCCL RDMA Plugin v9 (v9)
 Plugin Path : /opt/hpcx/nccl_rdma_sharp_plugin/lib/libnccl-net.so
 NET/IB : Made virtual device [0..7] name=mlx5_bond_0..7 speed=200000 ndevs=1
-NET/IB : Using [0]mlx5_bond_0:1/RoCE [1]mlx5_bond_1:1/RoCE ... [7]mlx5_bond_7:1/RoCE [RO]; OOB eth0:192.168.0.81<0>
+NET/IB : Using [0]mlx5_bond_0:1/RoCE [1]mlx5_bond_1:1/RoCE ... [7]mlx5_bond_7:1/RoCE [RO]; OOB eth0:<private-ip><0>
 NET/IB : GPU Direct RDMA (nvidia-peermem) enabled for HCA 0 'mlx5_bond_0
 NET/IB : GPU Direct RDMA (DMABUF) enabled for HCA 0 'mlx5_bond_0
 P2P plugin v9 IBext_v9
@@ -543,7 +543,7 @@ last enqueued work: 7422, last completed work: 7419
 `logs/train_20260516_182635_node{0..3}.log`,把 8c 的 `IB_TIMEOUT=23 / QPS=2 / PCI_RELAXED_ORDERING=1` 落进脚本后再跑一次 4 节点。INFO 级别的 NCCL 日志这次能看到完整初始化:
 
 ```
-NET/IB : Using [0..7]mlx5_bond_*:1/RoCE [RO]; OOB eth0:192.168.0.81<0>
+NET/IB : Using [0..7]mlx5_bond_*:1/RoCE [RO]; OOB eth0:<private-ip><0>
 NET/IB : GPU Direct RDMA (nvidia-peermem) enabled
 NET/IB : GPU Direct RDMA (DMABUF) enabled
 ncclCommInitRankConfig ... rank 0..7 nranks 32 - Init COMPLETE
@@ -564,7 +564,7 @@ Connected all trees
 `yaml ddp_timeout` 只作用于默认 PG;`TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC` 也只看默认 PG。DeepSpeed ZeRO-3 创建的所有子 PG 走 `dist.new_group(ranks)`,**没传 timeout**,torch 默认 `timedelta(seconds=600)`,这个 600 s 是 NCCL `WorkNCCL` watchdog 真正用的那个值。要改只能改源码或 patch:
 
 ```python
-# /jyx_data/jyx_data/miniconda3/envs/lf_v2/lib/python3.12/site-packages/deepspeed/comm/torch.py:373
+# <python-env>/site-packages/deepspeed/comm/torch.py:373
 
 # 改前:
 def new_group(self, ranks):
@@ -736,7 +736,7 @@ done
 所以撤回 patch:
 
 ```python
-# /jyx_data/jyx_data/miniconda3/envs/lf_v2/lib/python3.12/site-packages/deepspeed/comm/torch.py:373
+# <python-env>/site-packages/deepspeed/comm/torch.py:373
 # 恢复成 vanilla:
 def new_group(self, ranks):
     return torch.distributed.new_group(ranks)
@@ -781,7 +781,7 @@ mlx5_bond_7 -> reth14
 
 - **`eth0` 是 `virtio_net`**(virtio 软栈),不是物理网卡——之前 8e 默认走的"socket-on-eth0"实际是过虚拟化层
 - **`bond0..bond7` 是真实 mlx5 物理 netdev**(8 根 LACP bond,每根 200G × 2 = 400Gbps),容器里**完整暴露了 kernel netdev** 而不仅仅是 verbs 设备
-- 8 根 bond 在节点上各有独立 IPv4(从 fib_trie 看到 8 个 200.21.x.x 段 IP),典型 multi-rail RoCE 设计
+- 8 根 bond 在节点上各有独立 IPv4(具体地址已脱敏),属于典型 multi-rail RoCE 设计
 
 这意味着除了 8c/8d 走过的 verbs/RDMA 路径、8e 走的 virtio TCP 路径之外,**还有第三条没试过**:**mlx5 物理路径 + kernel TCP 栈**(`NCCL_IB_DISABLE=1` + `NCCL_SOCKET_IFNAME=bond0..bond7`)。它跟前两条都不重合:
 
@@ -839,9 +839,9 @@ NCCL_NSOCKS_PERTHREAD=8       # 64 路并行 socket 喂满 8 × 400G
 2. **bond 是 LACP `layer3+4` 哈希**,单 TCP 流只走一个 200G slave,要靠 NCCL 多 socket(`NCCL_NSOCKS_PERTHREAD=8 × NCCL_SOCKET_NTHREADS=8 = 64 流`)才能把 2 个 slave 都铺满 → 已在 `bond` 分支默认设好。
 3. **GPU/NIC NUMA 完美对齐**(NUMA 0: GPU 4 张 + reth0..7;NUMA 1: GPU 4 张 + reth8..15),走 bond 时每张 GPU 用同 NUMA 的 NIC,不跨 socket QPI;走 eth0 (virtio) 时所有数据汇到一个虚拟队列,丢失 NUMA locality。
 4. **sysfs `/sys/class/net/<dev>/qos/pfc_enable` 读不到**,容器内**无法独立验证 PFC 是否真启用**,这块只能让供应商从交换机侧 dump counter(对应 vendor escalation 工单第 2 项)。
-5. fib_trie LOCAL 段里 `172.16.x.x` 一坨>150 个是 K8s ClusterIP(kube-proxy 注入),**不是真本机 IP**;真本机 IP 是 `200.21.{3,4,5,6,7,7,8,9}.x` 这 8 个,刚好对应 8 根 bond,且每根在独立 /29 子网,确认是 multi-rail 设计。
-6. **eth0 是机器的默认出口**(`default via 192.168.0.253`),管理面/K8s/外网/容器内 DNS 全走它。这意味着 `socket-on-eth0` 模式下 NCCL 流量与所有管理面共享同一根 virtio 软栈;**邻居容器/host 任何高流量任务都会传染**,这是 5/17 配置零变更但 MTBF 退化的最大嫌疑根因——不是物理 fabric 烂,是 virtio 共享路径被压垮。
-7. **每根 bond 是独立 /29 + 独立 gateway**(`200.21.X.Y/29` via `200.21.X.(Y-1)`,metric 1010..1017),意味着 8 根 bond 对接 8 台不同的 ToR/leaf 交换机,fabric 侧物理上是 8 路 ECMP——这是 multi-rail RoCE 的"教科书拓扑",bond 路径配置上 100% 可行。kernel 默认 metric 选 bond0,但 NCCL 用 `SO_BINDTODEVICE` 显式绑每个 socket 到指定 bond,绕过 metric 选择,所以 `NCCL_SOCKET_IFNAME=bond0,...,bond7` 真正起作用。
+5. fib_trie LOCAL 段里的大量 K8s ClusterIP(kube-proxy 注入)并非本机 IP;真实节点地址已脱敏。8 根 bond 分别位于独立子网,确认是 multi-rail 设计。
+6. **eth0 是机器的默认出口**(网关地址已脱敏),管理面/K8s/外网/容器内 DNS 全走它。这意味着 `socket-on-eth0` 模式下 NCCL 流量与所有管理面共享同一根 virtio 软栈;**邻居容器/host 任何高流量任务都会传染**,这是配置零变更但 MTBF 退化的最大嫌疑根因——不是物理 fabric 烂,是 virtio 共享路径被压垮。
+7. **每根 bond 使用独立子网和 gateway**(地址与路由 metric 已脱敏),意味着各 bond 对接不同的 ToR/leaf 交换机,fabric 侧物理上是多路 ECMP。kernel 默认 metric 选 bond0,但 NCCL 用 `SO_BINDTODEVICE` 显式绑每个 socket 到指定 bond,绕过 metric 选择,所以 `NCCL_SOCKET_IFNAME=bond0,...,bond7` 真正起作用。
 8. **/sys 上 `mlx5_ib / ib_core / ib_uverbs / rdma_cm` 的 `version` 文件缺失但 RDMA 栈是好的**:`/sys/class/infiniband/mlx5_bond_*` 8 个 device 都在,这要求上述模块全加载。`version` 文件没有大概率是编译进 in-tree kernel 或 strip 过 modinfo,**不要被 `<not loaded>` 误导**。
 
 ### 8i 三通路对比与 fabric 升级判定(2026-05-17 晚)
@@ -872,7 +872,7 @@ NCCL_NSOCKS_PERTHREAD=8       # 64 路并行 socket 喂满 8 × 400G
 | 2 | IB/RoCE v1 | `::ffff:c815:....`(IPv4-mapped) | 过时,不用 |
 | **3** | **RoCE v2** | `::ffff:c815:....`(IPv4-mapped,后 4 段 hex 是 bond IPv4) | **跨 spine 路由的全局 GID,正解** |
 
-把 mlx5_bond_0..7 的 idx=3 GID 反解码,`c815:03d2 / 048a / 055a / 0636 / 0716 / 07f2 / 08ca / 0992` 正好对应 bond0..7 的 IPv4 `200.21.{3.210, 4.138, 5.90, 6.54, 7.22, 7.242, 8.202, 9.146}`(见 8h fib_trie 探测),100% 印证。
+把 mlx5_bond_0..7 的 idx=3 GID 反解码后,可与 bond0..7 的 IPv4 一一对应(具体 GID 与 IP 已脱敏),从而确认该索引正确。
 
 修正后 `run_sft_qwen3_5_35b_a3b_base.sh` 的 `roce` 分支恢复为 `NCCL_IB_GID_INDEX=3`(也就是这家集群的历史默认值,8h 那次"纠正"是误判)。
 
@@ -906,7 +906,7 @@ bond 模式 3 步内步耗时从 103s 涨到 84s 又涨,reduce_scatter 累积更
 请供应商 dump:
 - 每根 bond 对端 ToR 端口的 PFC counter / pause frame rate / CRC error / discard counter
 - 节点间 spine 8 路 ECMP 的 path utilization 与丢包率
-- 5/17 21:14-22:30 SGT 时段所有 ToR/spine 的 link flap、BER、optical power 日志
+- 故障时段所有 ToR/spine 的 link flap、BER、optical power 日志
 
 #### 行动项
 
@@ -922,8 +922,7 @@ bond 模式 3 步内步耗时从 103s 涨到 84s 又涨,reduce_scatter 累积更
 #### 操作
 
 ```bash
-PIP=/jyx_data/jyx_data/miniconda3/envs/lf_v2/bin/pip
-$PIP install --upgrade "torch==2.10.0"
+python -m pip install --upgrade "torch==2.10.0"
 # 同步带上 torch 生态(确认 transformers/deepspeed/fla/liger 与 2.10 兼容,
 # 必要时一并升级)
 ```
@@ -976,7 +975,7 @@ torch 2.10.0 相对 2.8.0 在分布式栈上有若干变化,可能与本次 hang
 #         在 data/dataset_info.json 里把 file_name 指到目录
 
 # ---- 环境 ----
-PIP=/jyx_data/jyx_data/miniconda3/envs/lf_v2/bin/pip
+PIP="python -m pip"
 
 # (Bug 8j ★ 多机训练根治) torch 升级到 2.10 — 这是 Bug 8 整段真正的解;
 #                          升完后 8a-8i 的网络层兜底全部退化为"无副作用的纵深防御"
@@ -1014,7 +1013,7 @@ $PIP install tilelang
 #         TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=1800
 # (Bug 8d/8g) deepspeed 子 PG patch 已撤回——8g 复盘 8e 实测 1800s 也没自愈,patch 边际为负.
 #   保留 vanilla:
-#     /jyx_data/jyx_data/miniconda3/envs/lf_v2/lib/python3.12/site-packages/deepspeed/comm/torch.py:373
+#     <python-env>/site-packages/deepspeed/comm/torch.py:373
 #     def new_group(self, ranks):
 #         return torch.distributed.new_group(ranks)
 #   未来若发现 auto-retry 后频繁链式 hang,可重新加回(默认 1200s 而非 1800s).
@@ -1031,7 +1030,7 @@ $PIP install tilelang
 启动:
 
 ```bash
-cd /jyx_data/LLaMA-Factory-latest
+cd /path/to/LLaMA-Factory
 
 # 单机 8 卡
 bash run_sft_qwen3_5_35b_a3b_base.sh

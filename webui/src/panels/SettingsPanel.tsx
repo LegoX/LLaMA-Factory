@@ -11,8 +11,8 @@ export interface LLMProfile {
   customPrompt: string;
 }
 
-const STORAGE_KEY = "harbor-rl-llm-profiles";
-const ACTIVE_KEY = "harbor-rl-active-profile";
+const STORAGE_KEY = "swe-lego-live-sft-llm-profiles";
+const ACTIVE_KEY = "swe-lego-live-sft-active-profile";
 
 export function loadProfiles(): LLMProfile[] {
   try {
