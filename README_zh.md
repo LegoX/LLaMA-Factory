@@ -66,8 +66,42 @@ https://github.com/user-attachments/assets/43b700c6-a178-41db-b1f8-8190a5d3fcfc
 > [!NOTE]
 > 除上述链接以外的其他网站均为未经许可的第三方网站，请小心甄别。
 
+## 与官方版本的关系
+
+**本仓库是 [hiyouga/LLaMA-Factory](https://github.com/hiyouga/LLaMA-Factory) 的 fork，而不是它的替代品。** 下文各章节均为官方文档，内容完全适用。如果你要找的是 LLaMA-Factory 本身，请直接使用官方仓库。
+
+本 fork 的目的，是承载在多节点 H800 集群上以 128K 上下文对 **Qwen3.5-35B-A3B-Base** 做全参数 SFT 所需的配置与少量补丁。它跟随官方 `main` 分支，并会**定期合并官方更新**；目标是尽量贴近官方版本，而不是与之分道扬镳。
+
+**本 fork 在官方版本之上新增的内容：**
+
+| 范围 | 改动 |
+|---|---|
+| `src/llamafactory/model/model_utils/liger_kernel.py` | 补上缺失的 `qwen3_5_moe` 分支；对该模型关闭 Liger 的 `swiglu`/`rms_norm` 类替换，仅保留 fused linear cross-entropy |
+| `src/llamafactory/train/sft/trainer.py` | 自定义 `_save`，按 5 GB 分片保存 checkpoint |
+| `install_env.sh` | 可复现的环境安装脚本，固定了经过验证的依赖版本 |
+| `run_sft_qwen3_5_35b_a3b_base.sh` | 多机 SFT 启动脚本：地址协商、固定全局 batch size、自动续训与重试 |
+| `examples/train_full/` | Qwen3.5-35B-A3B 全参数 SFT 配置 |
+| `webui/` | 独立的训练监控面板 |
+| `docs/` | [SFT 快速上手](docs/qwen3_5_35b_sft_quickstart.md)、[多机与长上下文排查笔记](docs/qwen3_5_moe_sft_multinode_notes.md)（英文） |
+
+对源码的改动刻意保持小而独立，以便日后向官方提 PR。其余内容都是**新增文件**（官方仓库中不存在），因此合并冲突很少。
+
+**合并策略。** 官方 `main` 会被定期合入。fork 自身的工作集中在上表所列文件中；除非没有别的办法，否则不修改官方文件。查看当前与官方的差异范围：
+
+```bash
+git remote add upstream https://github.com/hiyouga/LLaMA-Factory.git
+git fetch upstream
+git log --oneline upstream/main..HEAD    # 仅属于本 fork 的提交
+git diff --stat upstream/main...HEAD     # 本 fork 改动到的文件
+```
+
+当前 fork 基点为官方 [`6b9df75a`](https://github.com/hiyouga/LLaMA-Factory/commit/6b9df75ab9823d69c8c66a309389350585fbe728)（2026-05-13）。
+
+**关于密钥。** 本仓库不应出现任何 API key、token 或凭据。`WANDB_API_KEY`、`HF_TOKEN` 以及各类 LLM API key 一律从环境变量读取；训练启动脚本在 `WANDB_API_KEY` 未设置时会直接报错退出，而不是回退到内置默认值。
+
 ## 目录
 
+- [与官方版本的关系](#与官方版本的关系)
 - [项目特色](#项目特色)
 - [官方博客](#官方博客)
 - [更新日志](#更新日志)

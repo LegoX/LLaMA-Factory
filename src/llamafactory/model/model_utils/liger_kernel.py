@@ -104,6 +104,7 @@ def apply_liger_kernel(
         # access on step 2 forward under ZeRO-3 (observed on H800 + transformers 5.6.0
         # + liger-kernel 0.8.0). Keep only fused_linear_cross_entropy, which is the
         # part that actually resolves the long-context loss-stage OOM.
+        # See docs/qwen3_5_moe_sft_multinode_notes.md, section 7.
         kwargs.update({"swiglu": False, "rms_norm": False})
 
     apply_liger_kernel(**kwargs)

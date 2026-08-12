@@ -1,65 +1,68 @@
-# Qwen3.5-35B-A3B SFT 简明使用指引
+# Qwen3.5-35B-A3B SFT Quickstart
 
-本文面向社区用户，演示如何从环境安装开始，使用 SWE-Lego 样例数据完成一次 Qwen3.5-35B-A3B-Base 监督微调。文中的文件位置均为仓库内相对位置；模型和数据也可以直接使用 Hugging Face Hub ID。
+This guide walks through a full supervised fine-tune of Qwen3.5-35B-A3B-Base, from
+environment setup to launching training, using the public sample dataset published by
+SWE-Lego. All paths are relative to the repository root; models and datasets can also be
+referenced directly by Hugging Face Hub ID.
 
-## 1. 安装环境
+## 1. Install the environment
 
-克隆仓库并进入仓库根目录：
+Clone the repository and enter it:
 
 ```bash
 git clone https://github.com/SWE-Lego/LLaMA-Factory.git
 cd LLaMA-Factory
 ```
 
-运行环境安装脚本：
+Run the installer:
 
 ```bash
 bash install_env.sh
 conda activate lf_v3
 ```
 
-脚本会安装 LLaMA-Factory、PyTorch、DeepSpeed、FlashAttention、Liger Kernel 以及 Qwen3.5 训练所需的相关依赖。
+This installs LLaMA-Factory, PyTorch, DeepSpeed, FlashAttention, Liger Kernel and the
+remaining dependencies required for Qwen3.5 training. See
+[`install_env.sh`](../install_env.sh) for the pinned versions and why each one matters.
 
-## 2. 准备数据
+## 2. Prepare the data
 
-样例数据位于 Hugging Face：
+A sample dataset is published on Hugging Face under
+[`SWE-Lego/samples_for_llama_factory_sft`](https://huggingface.co/datasets/SWE-Lego/samples_for_llama_factory_sft).
 
-```text
-https://huggingface.co/datasets/SWE-Lego/samples_for_llama_factory_sft/blob/main/jierun_glm5_swerebench_oraclesolved_oh_sdk_512_for_qwen3_5.json
-```
-
-下载样例 JSON 到仓库的 `data` 目录：
+Download the sample JSON into the repository's `data` directory:
 
 ```bash
 curl -L \
-  -o data/jierun_glm5_swerebench_oraclesolved_oh_sdk_512_for_qwen3_5.json \
+  -o data/sft_sample_for_qwen3_5.json \
   https://huggingface.co/datasets/SWE-Lego/samples_for_llama_factory_sft/resolve/main/jierun_glm5_swerebench_oraclesolved_oh_sdk_512_for_qwen3_5.json
 ```
 
-该数据使用 `messages` 字段保存多轮对话，推荐保持如下结构：
+The data stores multi-turn conversations in a `messages` field. Keep this structure:
 
 ```json
 [
   {
     "messages": [
       {"role": "system", "content": "You are a helpful coding assistant."},
-      {"role": "user", "content": "用户问题或任务描述"},
-      {"role": "assistant", "content": "期望模型学习的回答"}
+      {"role": "user", "content": "The user question or task description"},
+      {"role": "assistant", "content": "The response the model should learn"}
     ]
   }
 ]
 ```
 
-其中 `role` 建议使用 `system`、`user`、`assistant`，训练损失主要来自 `assistant` 消息。
+Use `system`, `user` and `assistant` for `role`. The training loss comes primarily from
+the `assistant` messages.
 
-## 3. 注册数据
+## 3. Register the dataset
 
-在 `data/dataset_info.json` 中加入一个数据集条目：
+Add an entry to `data/dataset_info.json`:
 
 ```json
 {
-  "swelego_jierun_glm5_swerebench_oraclesolved_oh_sdk_512_for_qwen3_5": {
-    "file_name": "jierun_glm5_swerebench_oraclesolved_oh_sdk_512_for_qwen3_5.json",
+  "sft_sample_for_qwen3_5": {
+    "file_name": "sft_sample_for_qwen3_5.json",
     "formatting": "sharegpt",
     "columns": {
       "messages": "messages"
@@ -75,7 +78,8 @@ curl -L \
 }
 ```
 
-如果不想下载数据，也可以把数据发布到自己的 Hugging Face dataset repo，然后在 `dataset_info.json` 中使用 `hf_hub_url` 注册：
+To train without downloading anything locally, publish the data to your own Hugging Face
+dataset repository and register it with `hf_hub_url` instead:
 
 ```json
 {
@@ -96,15 +100,16 @@ curl -L \
 }
 ```
 
-## 4. 配置 `config.yaml`
+> If your dataset is a single JSON file larger than 2 GiB, split it into several smaller
+> files inside a directory and point `file_name` at that directory — PyArrow's 32-bit
+> string offsets overflow on larger single files. See
+> [the multi-node notes](qwen3_5_moe_sft_multinode_notes.md#1-pyarrow-int32-string-offset-overflow).
 
-仓库已在 `examples/train_full` 下提供 Qwen3.5-35B-A3B full SFT 配置示例，可参考：
+## 4. Write the training config
 
-```text
-examples/train_full/qwen3_5_35b_a3b_base_selfmade_traj_selected_gbs64pbs1acc8_lr5e-5_epo3.yaml
-```
-
-也可以在同一目录下创建自己的配置，例如 `examples/train_full/qwen3_5_35b_a3b_sft_sample.yaml`：
+The repository ships full-SFT examples for Qwen3.5-35B-A3B under `examples/train_full/`,
+which you can use as a starting point. To create your own, e.g.
+`examples/train_full/qwen3_5_35b_a3b_sft_sample.yaml`:
 
 ```yaml
 ### model
@@ -118,7 +123,7 @@ finetuning_type: full
 deepspeed: examples/deepspeed/ds_z3_config.json
 
 ### dataset
-dataset: swelego_jierun_glm5_swerebench_oraclesolved_oh_sdk_512_for_qwen3_5
+dataset: sft_sample_for_qwen3_5
 dataset_dir: data
 template: qwen3_5_nothink
 cutoff_len: 131072
@@ -155,18 +160,27 @@ use_unsloth_gc: true
 flash_attn: fa2
 ```
 
-按显存和数据长度调整 `cutoff_len`、`per_device_train_batch_size`、`gradient_accumulation_steps`。如需使用 W&B，将 `report_to` 改为 `wandb` 并提前登录。
+Tune `cutoff_len`, `per_device_train_batch_size` and `gradient_accumulation_steps` to fit
+your GPU memory and sequence lengths. `save_strategy: steps` with a small `save_steps` is
+recommended for long runs so that an interrupted job loses minutes rather than hours.
 
-## 5. 启动训练
+To log to Weights & Biases, set `report_to: wandb` and export your key before launching:
 
-单机多卡训练：
+```bash
+export WANDB_API_KEY=...   # never commit this
+```
+
+## 5. Launch training
+
+Single node, multiple GPUs:
 
 ```bash
 TRAIN_CONFIG=examples/train_full/qwen3_5_35b_a3b_sft_sample.yaml \
 bash run_sft_qwen3_5_35b_a3b_base.sh
 ```
 
-多机训练时，在每台机器上执行同一脚本，并为每台机器设置不同的 `NODE_RANK`：
+For multi-node training run the same script on every machine, giving each a distinct
+`NODE_RANK`:
 
 ```bash
 TRAIN_CONFIG=examples/train_full/qwen3_5_35b_a3b_sft_sample.yaml \
@@ -175,6 +189,15 @@ NODE_RANK=0 \
 bash run_sft_qwen3_5_35b_a3b_base.sh
 ```
 
-第二台机器将 `NODE_RANK` 改为 `1`；更多机器依次递增。
+Set `NODE_RANK=1` on the second machine, and increment it for any further nodes. The
+launcher derives `gradient_accumulation_steps` from the total GPU count so that the global
+batch size stays fixed as you scale nodes up or down.
 
-训练完成后，模型权重会保存到 `output_dir` 指定的位置。
+When training finishes, the weights are written to the `output_dir` from your config.
+
+## Troubleshooting
+
+If you hit dependency, long-context OOM or multi-node collective problems, see
+[Qwen3.5-MoE SFT: multi-node and long-context notes](qwen3_5_moe_sft_multinode_notes.md),
+which documents the failures this configuration was built to avoid and the reasoning
+behind each pinned version and environment variable.

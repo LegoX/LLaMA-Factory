@@ -1,46 +1,34 @@
 #!/usr/bin/env bash
 #
-# 用法示例:
+# Full-parameter SFT launcher for Qwen3.5-35B-A3B-Base.
 #
-# 1) 单节点 8 卡:
+# Usage
+#
+# 1) Single node, 8 GPUs:
 #   cd /path/to/LLaMA-Factory
 #   bash run_sft_qwen3_5_35b_a3b_base.sh
 #
-# 2) 两节点各 8 卡(推荐显式指定 node0 可被 node1 访问的 IP):
+# 2) Two nodes, 8 GPUs each:
 #   # node0
-#   cd /path/to/LLaMA-Factory
 #   NNODES=2 NODE_RANK=0 bash run_sft_qwen3_5_35b_a3b_base.sh
-#
 #   # node1
-#   cd /path/to/LLaMA-Factory
 #   NNODES=2 NODE_RANK=1 bash run_sft_qwen3_5_35b_a3b_base.sh
 #
-# 3) 四节点各 8 卡:
-#   # node0
-#   cd /path/to/LLaMA-Factory
-#   NNODES=4 NODE_RANK=0 bash run_sft_qwen3_5_35b_a3b_base.sh
+# 3) Four nodes, 8 GPUs each: run once per node with NODE_RANK=0..3 and NNODES=4.
 #
-#   # node1
-#   cd /path/to/LLaMA-Factory
-#   NNODES=4 NODE_RANK=1 bash run_sft_qwen3_5_35b_a3b_base.sh
+#   If the repository directory is not shared across nodes, the rendezvous file
+#   cannot be used; export the same MASTER_ADDR=<node0_ip> on every node instead.
 #
-#   # node2
-#   cd /path/to/LLaMA-Factory
-#   NNODES=4 NODE_RANK=2 bash run_sft_qwen3_5_35b_a3b_base.sh
-#
-#   # node3
-#   cd /path/to/LLaMA-Factory
-#   NNODES=4 NODE_RANK=3 bash run_sft_qwen3_5_35b_a3b_base.sh
-#
-#   # 若仓库目录不是四节点共享目录,建议四台机器显式传同一个 MASTER_ADDR=<node0_ip>。
-#
-# 说明:
-# - 启动前需 export WANDB_API_KEY=xxx (脚本不再内置默认值)。
-# - 默认 W&B run_name 取 TRAIN_CONFIG 文件名(去掉后缀)并追加时间戳,可通过 RUN_NAME=xxx 覆盖。
-# - 默认使用 NPROC_PER_NODE=8, TARGET_GBS=64, PER_DEVICE_BS=1。
-# - 默认在 torchrun 前清理所有用户的 GPU compute 进程; 需要足够权限。
-# - 如需跳过清理: CLEAR_GPU_PROCS=0 bash run_sft_qwen3_5_35b_a3b_base.sh
-# - 多网卡环境建议额外指定 NCCL_SOCKET_IFNAME/GLOO_SOCKET_IFNAME。
+# Notes
+# - Export WANDB_API_KEY before starting; the script has no built-in default and
+#   refuses to run without it. Never hardcode credentials in this file.
+# - The W&B run_name defaults to the TRAIN_CONFIG basename plus a timestamp;
+#   override with RUN_NAME=xxx.
+# - Defaults: NPROC_PER_NODE=8, TARGET_GBS=64, PER_DEVICE_BS=1.
+# - By default all users' GPU compute processes are cleared before torchrun,
+#   which requires sufficient permissions. Skip it with CLEAR_GPU_PROCS=0.
+# - On hosts with several NICs, set NCCL_SOCKET_IFNAME/GLOO_SOCKET_IFNAME
+#   explicitly to match your fabric.
 
 set -euo pipefail
 
@@ -54,10 +42,10 @@ if [ -z "${WANDB_API_KEY:-}" ]; then
 fi
 export WANDB_API_KEY
 
-# === 诊断仪表 ===
-# torch 2.10 升级之后 4 节点训练稳定;完整 traceback 诊断仪表
-# (NCCL INFO、TRACE_STAGES、TORCH_CPP_LOG_LEVEL=INFO、TRANSFORMERS=info 等)默认关闭。
-# DEBUG_HANG=1 一键切回排查模式,留作未来 fabric 再退化或 torch 被迫回退时的应急。
+# === Diagnostics ===
+# Verbose tracing is off by default. DEBUG_HANG=1 switches the whole script into
+# investigation mode (NCCL INFO, C++ log level INFO, per-rank torchrun logs) for
+# diagnosing multi-node collective hangs.
 DEBUG_HANG=${DEBUG_HANG:-0}
 
 if [ "$DEBUG_HANG" = "1" ]; then
@@ -65,30 +53,24 @@ if [ "$DEBUG_HANG" = "1" ]; then
     export NCCL_DEBUG_SUBSYS=${NCCL_DEBUG_SUBSYS:-INIT,COLL,NET}
     export TORCH_CPP_LOG_LEVEL=${TORCH_CPP_LOG_LEVEL:-INFO}
     export TRANSFORMERS_VERBOSITY=${TRANSFORMERS_VERBOSITY:-info}
-    # 阶段级插桩(tools/trace_hook.py): dataloader/forward/backward/save 各打 enter/exit
-    export TRACE_STAGES=${TRACE_STAGES:-1}
-    # collective 级插桩,刷屏量大,仅 hang 现场开
-    export TRACE_COLLECTIVES=${TRACE_COLLECTIVES:-1}
 else
     export NCCL_DEBUG=${NCCL_DEBUG:-WARN}
     export NCCL_DEBUG_SUBSYS=${NCCL_DEBUG_SUBSYS:-}
     export TORCH_CPP_LOG_LEVEL=${TORCH_CPP_LOG_LEVEL:-WARNING}
     export TRANSFORMERS_VERBOSITY=${TRANSFORMERS_VERBOSITY:-warning}
-    export TRACE_STAGES=${TRACE_STAGES:-0}
-    export TRACE_COLLECTIVES=${TRACE_COLLECTIVES:-0}
 fi
 
-# 以下是零运行时开销的"事后取证"配置,任何模式下都保留 ——
-# 进程不挂时它们不输出任何东西,挂掉时才有用,关掉只会让下一次排查更难。
+# Post-mortem forensics, kept in every mode: these cost nothing while the process
+# is healthy and only produce output once it crashes.
 export PYTHONUNBUFFERED=${PYTHONUNBUFFERED:-1}
-# faulthandler: SIGABRT/SIGSEGV/SIGFPE 时自动 dump Python 栈
+# faulthandler: dump the Python stack on SIGABRT/SIGSEGV/SIGFPE
 export PYTHONFAULTHANDLER=${PYTHONFAULTHANDLER:-1}
-# crash 时打印 C++ 栈(平时 silent)
+# print C++ stacks on crash (silent otherwise)
 export TORCH_SHOW_CPP_STACKTRACES=${TORCH_SHOW_CPP_STACKTRACES:-1}
 
-# NCCL 通路:socket-on-eth0(关 IB)+ 多路 socket + 8 MiB ring buffer。
-# 8j torch 2.10 升级后多机已稳,这套是 8a-8i 留下的纵深防御,无副作用,保留。
-# 历史与各参数取值依据见 docs/qwen3_5_moe_sft_troubleshooting.md Bug 8。
+# NCCL transport: socket on eth0 (IB disabled) + multi-socket + 8 MiB ring buffer.
+# See docs/qwen3_5_moe_sft_multinode_notes.md for why these values were chosen.
+# Override any of them to match your own fabric.
 export NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-eth0}
 export GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME:-eth0}
 export TP_SOCKET_IFNAME=${TP_SOCKET_IFNAME:-eth0}
@@ -97,9 +79,9 @@ export NCCL_SOCKET_NTHREADS=${NCCL_SOCKET_NTHREADS:-8}
 export NCCL_NSOCKS_PERTHREAD=${NCCL_NSOCKS_PERTHREAD:-8}
 export NCCL_BUFFSIZE=${NCCL_BUFFSIZE:-8388608}
 
-# watchdog:fire 后 180s SIGABRT 让 torchrun 退出进 auto-retry。其它两个是事后取证开关。
-# (TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC 不是"hang 容忍度",而是"hang 之后再卡多少秒才放手";
-#  8d 把它推到 1800s 反而白等 1200s,见 docs Bug 8g。)
+# Watchdog: once it fires, SIGABRT after 180s so torchrun exits into the auto-retry
+# loop. Note this is not a "hang tolerance" — it is how long to keep waiting after a
+# hang is already detected, so raising it only delays recovery.
 export TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=${TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC:-180}
 export TORCH_FR_BUFFER_SIZE=${TORCH_FR_BUFFER_SIZE:-2097152}
 export TORCH_NCCL_DUMP_ON_TIMEOUT=${TORCH_NCCL_DUMP_ON_TIMEOUT:-1}
@@ -213,7 +195,7 @@ clear_gpu_procs() {
     fi
 }
 
-# 分布式参数(可通过 env 覆盖)
+# Distributed parameters (override via env)
 NNODES=${NNODES:-1}
 NODE_RANK=${NODE_RANK:-0}
 NPROC_PER_NODE=${NPROC_PER_NODE:-8}
@@ -223,7 +205,7 @@ TRAIN_CONFIG_BASENAME=$(basename "$TRAIN_CONFIG")
 RUN_TIMESTAMP=$(date +%Y%m%d_%H%M)
 RUN_NAME=${RUN_NAME:-${TRAIN_CONFIG_BASENAME%.*}_${RUN_TIMESTAMP}}
 
-# NCCL flight recorder dump 落到本仓库 logs/(watchdog 触发时每 rank 一个 pickle)
+# NCCL flight recorder dumps land in logs/ (one pickle per rank when the watchdog fires)
 export TORCH_NCCL_DEBUG_INFO_TEMP_FILE="${TORCH_NCCL_DEBUG_INFO_TEMP_FILE:-$SCRIPT_DIR/logs/nccl_trace_${RUN_TIMESTAMP}_node${NODE_RANK}_rank}"
 mkdir -p "$SCRIPT_DIR/logs"
 
@@ -249,9 +231,10 @@ if [ ! -f "$TRAIN_CONFIG" ]; then
     exit 1
 fi
 
-# 自动续训:扫描 YAML 的 output_dir,挑步数最大且含 trainer_state.json 的 checkpoint-* 目录。
-# - RESUME=0           关闭自动续训
-# - RESUME_FROM_CHECKPOINT=<path>  显式指定路径(跳过自动检测)
+# Auto-resume: scan output_dir from the YAML and pick the highest-step checkpoint-*
+# directory that contains a trainer_state.json.
+# - RESUME=0                       disable auto-resume
+# - RESUME_FROM_CHECKPOINT=<path>  use an explicit path (skips auto-detection)
 RESUME=${RESUME:-1}
 RESUME_FROM_CHECKPOINT=${RESUME_FROM_CHECKPOINT:-}
 
@@ -301,8 +284,8 @@ if [ -n "$RESUME_FROM_CHECKPOINT" ]; then
     EXTRA_ARGS+=("resume_from_checkpoint=$RESUME_FROM_CHECKPOINT")
 fi
 
-# MASTER_ADDR 自动协商:多节点时,node0 把自己 IP 写到共享文件,其他节点读
-# 显式 export MASTER_ADDR 可跳过此逻辑
+# MASTER_ADDR rendezvous: on multi-node runs node0 writes its IP to a shared file
+# and the other nodes read it. Export MASTER_ADDR explicitly to skip this.
 RDZV_FILE=${RDZV_FILE:-$SCRIPT_DIR/.rdzv_master_addr_${MASTER_PORT}}
 RDZV_TIMEOUT=${RDZV_TIMEOUT:-300}
 RDZV_MAX_AGE=${RDZV_MAX_AGE:-600}
@@ -348,8 +331,8 @@ if [ -z "${MASTER_ADDR:-}" ]; then
     fi
 fi
 
-# 根据总卡数自动调整 gradient_accumulation_steps,保持目标 global batch size 不变
-# 公式: grad_accum = TARGET_GBS / (PER_DEVICE_BS * NPROC_PER_NODE * NNODES)
+# Derive gradient_accumulation_steps from the total GPU count so the global batch
+# size stays fixed: grad_accum = TARGET_GBS / (PER_DEVICE_BS * NPROC_PER_NODE * NNODES)
 TARGET_GBS=${TARGET_GBS:-64}
 PER_DEVICE_BS=${PER_DEVICE_BS:-1}
 for name in TARGET_GBS PER_DEVICE_BS; do
@@ -365,7 +348,7 @@ fi
 TOTAL_GPUS=$((NNODES * NPROC_PER_NODE))
 DENOM=$((PER_DEVICE_BS * TOTAL_GPUS))
 if [ $((TARGET_GBS % DENOM)) -ne 0 ]; then
-    echo "[error] TARGET_GBS=$TARGET_GBS 不能被 PER_DEVICE_BS*TOTAL_GPUS=$DENOM 整除,请调整 TARGET_GBS / PER_DEVICE_BS"
+    echo "[error] TARGET_GBS=$TARGET_GBS is not divisible by PER_DEVICE_BS*TOTAL_GPUS=$DENOM; adjust TARGET_GBS or PER_DEVICE_BS"
     exit 1
 fi
 GRAD_ACCUM=$((TARGET_GBS / DENOM))
@@ -386,24 +369,20 @@ fi
 clear_gpu_procs
 nvidia-smi
 
-# 训练重试循环: 8j torch 2.10 升级后稳态下基本不触发, 留作偶发 hang / 节点抖动的兜底
-# (watchdog fire 后 torchrun 退出, 下次循环从最近 checkpoint 自动续训, 见 docs Bug 8f)。
-# AUTO_RETRY=0 关闭自动重试; MAX_RETRIES 上限避免死循环(checkpoint 没动则停)。
+# Retry loop, a safety net for occasional collective hangs or flaky nodes: after the
+# watchdog fires torchrun exits and the next iteration resumes from the latest
+# checkpoint. AUTO_RETRY=0 disables it; MAX_RETRIES bounds the loop.
 AUTO_RETRY=${AUTO_RETRY:-1}
 MAX_RETRIES=${MAX_RETRIES:-20}
 RETRY_BACKOFF=${RETRY_BACKOFF:-30}
 
 run_torchrun() {
-    # TRACE_STAGES=1: tools/trace_train.py 先 import trace_hook 再 runpy src/train.py
-    # TRACE_STAGES=0: 退化为原行为,直接跑 src/train.py
     local entry="src/train.py"
-    if [ "${TRACE_STAGES:-0}" = "1" ] && [ -f "tools/trace_train.py" ]; then
-        entry="tools/trace_train.py"
-    fi
 
-    # 稳态(DEBUG_HANG=0): 只产出 $TRAIN_LOG 一份合并日志,所有 rank 经 awk 加毫秒时间戳。
-    # 排查模式(DEBUG_HANG=1): 额外开 torchrun --tee/--redirects, 把每个 rank 的 stdout+stderr
-    # 单独落盘到 $tr_log_dir/<local_rank>/{stdout,stderr}.log, 方便事后 grep 单 rank。
+    # Normal mode (DEBUG_HANG=0): a single merged $TRAIN_LOG, every rank timestamped by awk.
+    # Investigation mode (DEBUG_HANG=1): additionally enable torchrun --tee/--redirects so
+    # each rank's stdout+stderr also lands in $tr_log_dir/<local_rank>/, making it possible
+    # to grep a single rank after the fact.
     local tee_args=()
     if [ "${DEBUG_HANG:-0}" = "1" ]; then
         local tr_log_dir="$LOG_DIR/torchrun_${RUN_TIMESTAMP}_node${NODE_RANK}_attempt${attempt}"
@@ -411,7 +390,7 @@ run_torchrun() {
         tee_args=(--tee 3 --redirects 3 --log-dir "$tr_log_dir")
     fi
 
-    # PIPESTATUS[0] 仍是 torchrun 真实 rc
+    # PIPESTATUS[0] is still torchrun's real exit code
     torchrun --nnodes="$NNODES" \
          --nproc_per_node="$NPROC_PER_NODE" \
          --master_addr="$MASTER_ADDR" \
@@ -428,7 +407,7 @@ run_torchrun() {
     return "${PIPESTATUS[0]}"
 }
 
-# 重新扫描最近 checkpoint(每次重试前); 跟脚本顶部同样逻辑,但单独抽出来调用
+# Rescan for the latest checkpoint before each retry (same logic as above, factored out)
 rescan_resume() {
     [ "$RESUME" = "1" ] || return 0
     local out_dir latest_ckpt latest_step step d
@@ -455,7 +434,7 @@ rescan_resume() {
         fi
     done
     if [ -n "$latest_ckpt" ]; then
-        # 替换 EXTRA_ARGS 里旧的 resume_from_checkpoint=...,没有就追加
+        # replace any existing resume_from_checkpoint= in EXTRA_ARGS, otherwise append
         local found=0 i
         for i in "${!EXTRA_ARGS[@]}"; do
             case "${EXTRA_ARGS[$i]}" in
@@ -489,7 +468,7 @@ while : ; do
         echo "[run] hit MAX_RETRIES=$MAX_RETRIES, abort"
         exit "$rc"
     fi
-    # 进入下次循环前: 清理 zombie GPU 进程 + 等 backoff + 重扫 ckpt
+    # before the next attempt: clear zombie GPU processes, back off, rescan checkpoints
     clear_gpu_procs
     sleep "$RETRY_BACKOFF"
     rescan_resume

@@ -1,30 +1,31 @@
 #!/usr/bin/env bash
 #
-# install_env.sh — 一键安装 Qwen3.5-35B-A3B-Base SFT 训练环境
+# install_env.sh — one-shot environment installer for Qwen3.5-35B-A3B-Base SFT.
 #
-# 合并自:
-#   - install.md                                  (基础安装步骤)
-#   - docs/qwen3_5_moe_sft_troubleshooting.md      (7+1 个 bug 的修复 / "整体修复清单")
+# It creates (or reuses) a conda environment and installs the exact dependency
+# versions this fork's training scripts were validated against. The rationale for
+# each pinned version is documented in docs/qwen3_5_moe_sft_multinode_notes.md.
 #
-# 覆盖的 bug:
-#   Bug 3  flash-linear-attention==0.5.0   (默认值,可通过 FLA_VERSION 覆盖)
-#   Bug 4  transformers FA2 s_aux=None     (site-packages 一行补丁,本脚本自动打)
-#   Bug 5  liger qwen3_5_moe dispatch      (已在仓库源码,pip install -e . 自动生效)
-#   Bug 6  tilelang                        (pip,Hopper + Triton>=3.4 反向所需)
-#   Bug 7  liger swiglu/rms_norm 关闭      (已在仓库源码)
-#   Bug 8j torch==2.10.0                   (多机 hang 根治)
+# What it handles:
+#   - torch 2.10.0 + cu128        stable multi-node collectives
+#   - flash-linear-attention      required by Qwen3.5 packing-seq forwarding
+#   - tilelang                    correct gated_delta_rule backward on Hopper + Triton>=3.4
+#   - transformers FA2 s_aux      one-line site-packages patch, reapplied idempotently
+#   - liger-kernel dispatch       already patched in this repo's source, picked up by `pip install -e .`
 #
-# 用法:
-#   bash install_env.sh                 # 默认:创建/复用 conda env "lf_v3"
-#   ENV_NAME=lf_v3 bash install_env.sh  # 自定义环境名
+# Usage:
+#   bash install_env.sh                 # create/reuse conda env "lf_v3"
+#   ENV_NAME=my_env bash install_env.sh # custom environment name
 #
-# 幂等:可重复运行;已装的包/已打的补丁会跳过。
+# To install through a PyPI mirror, export PYPI_INDEX_URL=<mirror url>.
+#
+# Idempotent: safe to re-run; installed packages and applied patches are skipped.
 set -euo pipefail
 
 # ----------------------------------------------------------------------------
-# 0. 配置
+# 0. Configuration
 # ----------------------------------------------------------------------------
-# 仓库根目录:默认取本脚本所在目录
+# Repository root: defaults to the directory containing this script.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_NAME="${ENV_NAME:-lf_v3}"
 PY_VERSION="${PY_VERSION:-3.12}"
@@ -33,20 +34,24 @@ TORCH_VERSION="${TORCH_VERSION:-2.10.0}"
 TORCHVISION_VERSION="${TORCHVISION_VERSION:-0.25.0}"
 TORCHAUDIO_VERSION="${TORCHAUDIO_VERSION:-2.10.0}"
 TORCH_INDEX_URL="${TORCH_INDEX_URL:-https://download.pytorch.org/whl/cu128}"
-PYPI_INDEX_URL="${PYPI_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
+# Empty means "use pip's configured default index". Set it to a mirror if needed.
+PYPI_INDEX_URL="${PYPI_INDEX_URL:-}"
 TRANSFORMERS_VERSION="${TRANSFORMERS_VERSION:-5.6.0}"
 FLA_VERSION="${FLA_VERSION:-0.5.0}"
 FSSPEC_VERSION="${FSSPEC_VERSION:-2025.3.0}"
+
+PYPI_ARGS=()
+[ -n "$PYPI_INDEX_URL" ] && PYPI_ARGS=(--index-url "$PYPI_INDEX_URL")
 
 log()  { printf '\033[1;32m[install_env]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[install_env]\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31m[install_env] ERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 
 # ----------------------------------------------------------------------------
-# 1. 定位并初始化 conda
+# 1. Locate and initialize conda
 # ----------------------------------------------------------------------------
-log "定位 conda ..."
-# 优先用 PATH 里的 conda;否则可用 CONDA_HOME 指定安装目录,再退回 $HOME/miniconda3
+log "Locating conda ..."
+# Prefer conda on PATH; otherwise honour CONDA_HOME, then fall back to the usual roots.
 if ! command -v conda >/dev/null 2>&1; then
     for guess in "${CONDA_HOME:-}" "$HOME/miniconda3" "$HOME/anaconda3"; do
         if [ -n "$guess" ] && [ -x "$guess/bin/conda" ]; then
@@ -55,7 +60,7 @@ if ! command -v conda >/dev/null 2>&1; then
         fi
     done
 fi
-command -v conda >/dev/null 2>&1 || die "找不到 conda。请先安装 Miniconda 并 conda init,或设置 CONDA_HOME。"
+command -v conda >/dev/null 2>&1 || die "conda not found. Install Miniconda and run 'conda init', or set CONDA_HOME."
 
 CONDA_BASE="$(conda info --base)"
 # shellcheck disable=SC1091
@@ -63,26 +68,27 @@ source "$CONDA_BASE/etc/profile.d/conda.sh"
 log "conda base: $CONDA_BASE"
 
 # ----------------------------------------------------------------------------
-# 2. 创建 / 复用环境
+# 2. Create or reuse the environment
 # ----------------------------------------------------------------------------
 if conda env list | awk '{print $1}' | grep -qx "$ENV_NAME"; then
-    log "环境 '$ENV_NAME' 已存在,复用。"
+    log "Environment '$ENV_NAME' already exists, reusing it."
 else
-    log "创建环境 '$ENV_NAME' (python=$PY_VERSION) ..."
+    log "Creating environment '$ENV_NAME' (python=$PY_VERSION) ..."
     conda create -n "$ENV_NAME" "python=$PY_VERSION" -y
 fi
 
 conda activate "$ENV_NAME"
 PYBIN="$(command -v python)"
 PIP="$PYBIN -m pip"
-log "使用 python: $PYBIN"
-[ -d "$REPO_DIR" ] || die "找不到仓库目录 $REPO_DIR"
+log "Using python: $PYBIN"
+[ -d "$REPO_DIR" ] || die "repository directory not found: $REPO_DIR"
 cd "$REPO_DIR"
 
 # ----------------------------------------------------------------------------
-# 3. PyTorch 2.10.0 + cu128  (Bug 8j: 多机训练 hang 根治)
+# 3. PyTorch 2.10.0 + cu128
+#    Earlier 2.8.x releases hang on multi-node _REDUCE_SCATTER_BASE in this setup.
 # ----------------------------------------------------------------------------
-log "安装 PyTorch $TORCH_VERSION (cu128) ..."
+log "Installing PyTorch $TORCH_VERSION (cu128) ..."
 $PIP install \
     "torch==$TORCH_VERSION" \
     "torchvision==$TORCHVISION_VERSION" \
@@ -90,34 +96,36 @@ $PIP install \
     --index-url "$TORCH_INDEX_URL"
 
 # ----------------------------------------------------------------------------
-# 4. LlamaFactory 本体 + 依赖
-#    (Bug 5 / Bug 7 的 liger dispatch 补丁已在仓库源码里,-e 安装自动生效)
+# 4. LlamaFactory itself plus training extras
+#    The liger dispatch fix lives in this repo's source, so the editable install
+#    picks it up automatically.
 # ----------------------------------------------------------------------------
-log "安装 LlamaFactory (editable) ..."
-$PIP install --index-url "$PYPI_INDEX_URL" -e .
+log "Installing LlamaFactory (editable) ..."
+$PIP install "${PYPI_ARGS[@]}" -e .
 
-log "安装 requirements (metrics / deepspeed / liger-kernel) ..."
-$PIP install --index-url "$PYPI_INDEX_URL" -r requirements/metrics.txt
-$PIP install --index-url "$PYPI_INDEX_URL" -r requirements/deepspeed.txt
-$PIP install --index-url "$PYPI_INDEX_URL" -r requirements/liger-kernel.txt
+log "Installing requirements (metrics / deepspeed / liger-kernel) ..."
+$PIP install "${PYPI_ARGS[@]}" -r requirements/metrics.txt
+$PIP install "${PYPI_ARGS[@]}" -r requirements/deepspeed.txt
+$PIP install "${PYPI_ARGS[@]}" -r requirements/liger-kernel.txt
 
 # ----------------------------------------------------------------------------
 # 5. flash-attn (FA2)
 # ----------------------------------------------------------------------------
-log "安装 flash-attn (--no-build-isolation,编译较慢) ..."
+log "Installing flash-attn (--no-build-isolation; compilation is slow) ..."
 $PIP install \
-    --index-url "$PYPI_INDEX_URL" \
+    "${PYPI_ARGS[@]}" \
     flash-attn \
     --no-build-isolation
 
 # ----------------------------------------------------------------------------
-# 6. Qwen3.5 linear-attention 依赖与版本纠偏
-#    直接依赖已由 LlamaFactory 安装。这里使用 --no-deps,避免把 CUDA 12.8
-#    的 PyTorch 替换成 PyPI 上其它 CUDA 版本,也避免 transformers 漂移。
+# 6. Pin the Qwen3.5 linear-attention stack
+#    LlamaFactory already pulls these in. --no-deps keeps pip from replacing the
+#    CUDA 12.8 PyTorch build with a different CUDA variant from PyPI, and stops
+#    transformers from drifting off the validated version.
 # ----------------------------------------------------------------------------
-log "固定 transformers / flash-linear-attention / fsspec 版本 ..."
+log "Pinning transformers / flash-linear-attention / fsspec ..."
 $PIP install \
-    --index-url "$PYPI_INDEX_URL" \
+    "${PYPI_ARGS[@]}" \
     --no-deps \
     --upgrade \
     "flash-linear-attention==$FLA_VERSION" \
@@ -126,24 +134,26 @@ $PIP install \
     "fsspec==$FSSPEC_VERSION"
 
 # ----------------------------------------------------------------------------
-# 7. Bug 6: tilelang (Hopper + Triton>=3.4 上 gated_delta_rule 反向必需)
+# 7. tilelang — required for a correct gated_delta_rule backward on Hopper
+#    when Triton >= 3.4 is in use.
 # ----------------------------------------------------------------------------
-log "安装 tilelang (Bug 6) ..."
-$PIP install --index-url "$PYPI_INDEX_URL" tilelang
+log "Installing tilelang ..."
+$PIP install "${PYPI_ARGS[@]}" tilelang
 
 # ----------------------------------------------------------------------------
-# 8. 实验追踪
+# 8. Experiment tracking
 # ----------------------------------------------------------------------------
-log "安装 wandb ..."
-$PIP install --index-url "$PYPI_INDEX_URL" wandb
+log "Installing wandb ..."
+$PIP install "${PYPI_ARGS[@]}" wandb
 
 # ----------------------------------------------------------------------------
-# 9. Bug 4: transformers FA2 s_aux=None 解引用补丁
-#    transformers <5.7 在 flash_attention.py 无条件 s_aux.to(...);视觉塔前向
-#    时 s_aux=None -> 'NoneType' has no attribute 'to'。这是 site-packages 里的
-#    包,重装 transformers 会丢补丁,故每次安装后都自动(幂等)重打。
+# 9. Patch the transformers FA2 s_aux=None dereference
+#    transformers < 5.7 calls s_aux.to(...) unconditionally in flash_attention.py.
+#    During the vision-tower forward s_aux is None, producing
+#    "'NoneType' object has no attribute 'to'". The file lives in site-packages, so
+#    reinstalling transformers drops the patch; it is reapplied on every run.
 # ----------------------------------------------------------------------------
-log "应用 Bug 4 补丁:transformers FA2 s_aux=None guard ..."
+log "Applying transformers FA2 s_aux=None guard ..."
 "$PYBIN" - <<'PYEOF'
 import os
 import transformers
@@ -151,7 +161,7 @@ import transformers
 fa = os.path.join(os.path.dirname(transformers.__file__),
                   "integrations", "flash_attention.py")
 if not os.path.exists(fa):
-    print(f"[install_env]   跳过:找不到 {fa}")
+    print(f"[install_env]   skipped: {fa} not found")
     raise SystemExit(0)
 
 src = open(fa, encoding="utf-8").read()
@@ -159,23 +169,25 @@ buggy = "s_aux=s_aux.to(query.dtype),"
 fixed = "s_aux=s_aux.to(query.dtype) if s_aux is not None else None,"
 
 if fixed in src:
-    print(f"[install_env]   已是修复版({transformers.__version__}),无需改动。")
+    print(f"[install_env]   already fixed ({transformers.__version__}), nothing to do.")
 elif buggy in src:
     open(fa, "w", encoding="utf-8").write(src.replace(buggy, fixed, 1))
-    print(f"[install_env]   已打补丁 -> {fa}")
+    print(f"[install_env]   patched -> {fa}")
 else:
-    # 上游 >=5.7 已修复,或写法不同;不强改,提示人工确认。
-    print(f"[install_env]   未找到目标行,可能上游已修复({transformers.__version__})。"
-          " 若训练时报 's_aux NoneType.to'，请手动核对 flash_attention.py。")
+    # Upstream >= 5.7 fixed this, or the code was restructured. Do not force a
+    # rewrite; ask for a manual check instead.
+    print(f"[install_env]   target line not found; upstream may already have fixed it"
+          f" ({transformers.__version__}). If training reports \"s_aux NoneType.to\","
+          " inspect flash_attention.py manually.")
 PYEOF
 
 # ----------------------------------------------------------------------------
-# 10. 校验
+# 10. Verification
 # ----------------------------------------------------------------------------
-log "检查 Python 包依赖一致性 ..."
+log "Checking Python dependency consistency ..."
 $PIP check
 
-log "环境自检 ..."
+log "Running environment self-check ..."
 EXPECTED_TORCH_VERSION="$TORCH_VERSION" \
 EXPECTED_TRANSFORMERS_VERSION="$TRANSFORMERS_VERSION" \
 EXPECTED_FLA_VERSION="$FLA_VERSION" \
@@ -230,21 +242,24 @@ for module in ("transformers", "fla", "fsspec"):
             f"{module} version drift: expected {expected[module]}, got {versions[module]}"
         )
 
-# 导入执行 LLaMA-Factory 依赖版本检查的解析器路径。
+# Import the parser path that runs LLaMA-Factory's own dependency version checks.
 importlib.import_module("llamafactory.hparams")
 print("  LLaMA-Factory dependency check: OK")
 PYEOF
 
-log "完成 ✅  环境 '$ENV_NAME' 已就绪。"
+log "Done. Environment '$ENV_NAME' is ready."
 cat <<EOF
 
-下一步:
+Next steps:
   conda activate $ENV_NAME
   cd $REPO_DIR
 
-  # 单机 8 卡
+  # Export your own W&B key first (never commit it)
+  export WANDB_API_KEY=...
+
+  # Single node, 8 GPUs
   bash run_sft_qwen3_5_35b_a3b_base.sh
 
-  # 多机 (以 4 节点为例,每台机器各跑一次,NODE_RANK 取 0..3)
+  # Multi-node, e.g. 4 nodes: run once per node with NODE_RANK=0..3
   NNODES=4 NODE_RANK=0 bash run_sft_qwen3_5_35b_a3b_base.sh
 EOF

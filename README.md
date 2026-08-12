@@ -64,8 +64,42 @@ Read technical notes:
 > [!NOTE]
 > Except for the above links, all other websites are unauthorized third-party websites. Please carefully use them.
 
+## Relationship to Upstream LLaMA-Factory
+
+**This repository is a fork of [hiyouga/LLaMA-Factory](https://github.com/hiyouga/LLaMA-Factory), not a replacement for it.** Everything in the sections below is upstream documentation and applies unchanged. If you are looking for LLaMA-Factory itself, use the upstream repository.
+
+This fork exists to carry the configuration and small patches needed to run full-parameter SFT of **Qwen3.5-35B-A3B-Base** at 128K context on multi-node H800 clusters. It tracks upstream `main` and **merges upstream updates periodically**; the goal is to stay close to upstream rather than to diverge from it.
+
+**What this fork adds on top of upstream:**
+
+| Area | Change |
+|---|---|
+| `src/llamafactory/model/model_utils/liger_kernel.py` | Adds the missing `qwen3_5_moe` dispatch branch, and disables Liger's `swiglu`/`rms_norm` class swaps for that model type while keeping fused linear cross-entropy |
+| `src/llamafactory/train/sft/trainer.py` | Custom `_save` that shards checkpoints at 5 GB |
+| `install_env.sh` | Reproducible environment installer with the dependency versions this setup was validated against |
+| `run_sft_qwen3_5_35b_a3b_base.sh` | Multi-node SFT launcher: rendezvous, fixed global batch size, auto-resume and retry |
+| `examples/train_full/` | Full-SFT configs for Qwen3.5-35B-A3B |
+| `webui/` | A standalone training dashboard for monitoring runs |
+| `docs/` | [SFT quickstart](docs/qwen3_5_35b_sft_quickstart.md) and [multi-node/long-context notes](docs/qwen3_5_moe_sft_multinode_notes.md) |
+
+The source changes are deliberately kept small and self-contained so they can be offered upstream. Everything else is additive — new files that upstream does not have — which keeps merge conflicts rare.
+
+**Merge policy.** Upstream `main` is merged in on a regular basis. Fork-specific work stays in the files listed above; upstream files are modified only when there is no alternative. To see exactly how far this fork has diverged:
+
+```bash
+git remote add upstream https://github.com/hiyouga/LLaMA-Factory.git
+git fetch upstream
+git log --oneline upstream/main..HEAD    # commits unique to this fork
+git diff --stat upstream/main...HEAD     # files this fork touches
+```
+
+The current fork point is upstream [`6b9df75a`](https://github.com/hiyouga/LLaMA-Factory/commit/6b9df75ab9823d69c8c66a309389350585fbe728) (2026-05-13).
+
+**Credentials.** No API keys, tokens or credentials belong in this repository. `WANDB_API_KEY`, `HF_TOKEN` and any LLM API keys are read from the environment only; the training launcher refuses to start if `WANDB_API_KEY` is unset rather than falling back to a default.
+
 ## Table of Contents
 
+- [Relationship to Upstream LLaMA-Factory](#relationship-to-upstream-llama-factory)
 - [Features](#features)
 - [Blogs](#blogs)
 - [Changelog](#changelog)

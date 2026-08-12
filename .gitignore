@@ -183,6 +183,12 @@ wandb/
 swanlog/
 generated_predictions.jsonl
 predictions_score.json
-/data/
-/*.txt
+# Local training corpora dropped into data/. Upstream ships its demo datasets and
+# dataset_info.json from this directory, so ignore only bulk local formats rather
+# than the whole directory — a blanket `/data/` rule silently hides new upstream
+# files on every merge.
+/data/*_shards/
+/data/**/*.parquet
+/data/**/*.arrow
+/data/**/*.bin
 logs/
