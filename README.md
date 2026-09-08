@@ -660,7 +660,7 @@ See [examples/README.md](examples/README.md) for advanced usage (including distr
 
 For single-node **8×H200** Qwen3.5-35B-A3B-Base full SFT, see the [512K guide](examples/megatron/README_512k.md) and [sanitized YAML](examples/megatron/qwen3_5_35b_a3b_base_512k_yarn.yaml). This uses `USE_MCA=1` with **mcore_adapter / Megatron-Core**, not Megatron Bridge: TP2 / PP2 / CP2 / EP4 / ETP1, YaRN factor 2, BF16 computation, FP32 gradient accumulation, and 75% optimizer CPU offload.
 
-The guide lists required local extensions; stock packages plus the YAML are not sufficient. Optimizer steps have been observed, but this does not certify completion of full training, HF export, or evaluation. Replace placeholder paths and register your dataset. Do not launch on occupied GPUs.
+The guide includes the workflow integration, a fixed-baseline adapter patch with checksums, isolated-environment installation instructions, and a checked launcher; stock packages plus the YAML alone are not sufficient. Optimizer steps have been observed, but this does not certify completion of full training, HF export, or evaluation. Replace placeholder paths and register your dataset. Do not launch on occupied GPUs.
 
 ### Fine-Tuning with LLaMA Board GUI (powered by [Gradio](https://github.com/gradio-app/gradio))
 

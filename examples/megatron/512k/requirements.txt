@@ -1,0 +1,6 @@
+megatron-core==0.18.2
+transformer-engine[pytorch]==2.18.0
+flash-attn==2.8.3.post1
+flash-linear-attention==0.5.1
+fla-core==0.5.1
+causal-conv1d==1.6.2.post1

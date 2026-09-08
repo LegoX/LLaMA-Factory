@@ -18,11 +18,11 @@ Optimizer steps have been observed. This guide does **not** certify completion o
 | Transformers | `5.6.0` |
 | Transformer Engine | `2.18.0` |
 
-This is an environment record, not a complete lockfile. Stock wheels with these labels do not necessarily include the required changes. Host RAM must accommodate optimizer offload and saving; a minimum has not been established here. Do not assume this fits smaller GPUs.
+The bundled [constraints](512k/constraints.txt) pin the observed installed Python package versions; local editable packages and private data-processing tools are excluded. The adapter source is pinned separately below. This does not lock OS packages, drivers, or compiler build dependencies. Use Linux x86-64, Python 3.12, a CUDA 12.8 toolkit (observed nvcc 12.8.93), and a CUDA-12.8-compatible NVIDIA driver. Host RAM must accommodate optimizer offload and saving; a minimum has not been established here. Do not assume this fits smaller GPUs.
 
 ## Local extension checklist
 
-This inventory is **not a bundled patch set**. The adapter is a separate repository: committing this example does not publish its modifications. Before claiming clean-machine reproducibility, review and preserve required changes as versioned commits or reviewed patches, and document how to obtain them. Do not update an environment used by a running job.
+The LLaMA-Factory `workflow.py` integration is included in this branch. The six-file adapter implementation is included as [mcore-adapter.patch](512k/mcore-adapter.patch), against official ROLL commit `192b1a01ea61c113b2deb543f7b115783038dff8`. The [manifest](512k/manifest.json) records before/after file checksums and the LLaMA-Factory integration checksum. Applying this bundle reconstructs the adapter source used by the reference job; access to its original machine is not required. Do not patch a checkout or environment being used by a running job.
 
 | Location | Relevant local changes |
 | --- | --- |
@@ -34,7 +34,7 @@ This inventory is **not a bundled patch set**. The adapter is a separate reposit
 | Adapter: `mcore_adapter/src/mcore_adapter/models/qwen3_vl/rope_utils.py` | Local YaRN frequency interpolation and rotary scaling. |
 | Adapter: `mcore_adapter/src/mcore_adapter/models/model_factory.py` | TP-aware fused cross entropy and checkpointed chunked vocabulary-parallel output processing to limit peak logits memory. |
 
-Not every existing diff is required by this dataset: optional loss weighting and benchmark instrumentation are also present. Review actual implementations rather than copying all local changes. Separate HF RoPE/Liger changes, unrelated experiments, and generated files from this documentation change.
+The bundle preserves the exact six-file reference implementation, including optional loss weighting and benchmark instrumentation; those optional features need not be enabled for this YAML. It does not include unrelated HF RoPE/Liger edits, private datasets, or other experimental configurations.
 
 ## Data and schedule
 
@@ -57,19 +57,67 @@ The YAML retains `max_steps: 117` and `lr_scheduler_kwargs.lr_decay_steps: 117`.
 - mRoPE with YaRN factor 2, original length 262,144 and maximum length 524,288; these adapter-specific fields require the changes listed above.
 - `fine_grained_activation_offloading: false`: the retained `offload_modules` list does not enable activation offload. Optimizer offload is separate.
 
-## Launch after preparing dependencies
+## Install into a separate environment
 
-Activate the prepared environment. From the repository root, replace the adapter path below with the reviewed patched checkout. Launch only when all eight GPUs are available.
+Use a fresh checkout of the private `LegoX/LLaMA-Factory` repository on `conghao/feature` containing this bundle, not an upstream public checkout. Install system prerequisites first: Python 3.12 with venv support, Git, a C++ compiler/build tools, and CUDA 12.8 with `nvcc`. Network access to GitHub, PyPI, and the PyTorch wheel index is required. CUDA extensions may compile from source; allow disk space and time for compilation.
+
+From this repository root:
 
 ```bash
-env USE_MCA=1 NPROC_PER_NODE=8 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
-  PYTHONPATH="/path/to/patched-adapter/mcore_adapter/src${PYTHONPATH:+:$PYTHONPATH}" \
-  llamafactory-cli train examples/megatron/qwen3_5_35b_a3b_base_512k_yarn.yaml
+export CUDA_HOME=/path/to/cuda-12.8
+bash examples/megatron/512k/install.sh /work/venvs/qwen35-512k /work/src/roll-qwen35-512k
 ```
 
-In tmux, run in the foreground of the designated pane with stdout/stderr attached. Do not use `tee`, shell redirection, or a background launcher. Persist output separately with tmux-native pane capture if needed.
+Both target paths must be absolute and must not already exist. The script creates an isolated venv, installs the pinned PyTorch CUDA 12.8 build and runtime dependencies, checks out the fixed official ROLL commit, applies and verifies the included patch, installs both projects, and runs `pip check`. It does not start training. It deliberately refuses to update an existing environment. If installation fails, inspect the error rather than rerunning against an active environment. The old generic Megatron Dockerfile targets different versions and is not this recipe.
+
+For an already prepared **separate** environment and clean adapter checkout, the patch tool can also be used directly:
+
+```bash
+python examples/megatron/512k/prepare_adapter.py /work/src/roll-qwen35-512k --apply
+```
+
+Without `--apply` it is read-only verification. It refuses a different baseline, partial patches, unrelated tracked edits, or checksum mismatches. Reapplying the exact bundle is a verified no-op.
+
+## Prepare data and launch
+
+The earlier data section describes how to register your own dataset. For example, an Alpaca-format JSON array of records with `instruction`, `input`, and `output` can be registered inside the selected dataset directory with:
+
+```json
+{
+  "long_context_sft": {
+    "file_name": "train.json",
+    "formatting": "alpaca",
+    "columns": {"prompt": "instruction", "query": "input", "response": "output"}
+  }
+}
+```
+
+This is a schema example, not the private reference dataset. Use the actual matching data format and benchmark filtering for your experiment. Copy the supplied YAML to a new file, replace its model/data paths, and set a fresh output directory; retain the reference parameters when reproducing that run. For a one-step acceptance run on free GPUs, use a separate config with `max_steps: 1`, `lr_scheduler_kwargs: {lr_decay_steps: 1}`, and a new output directory. Use representative long samples; a short synthetic sample does not validate 512K memory behavior.
+
+Once all eight GPUs are available, launch from the repository root:
+
+```bash
+bash examples/megatron/512k/run.sh /work/venvs/qwen35-512k /work/src/roll-qwen35-512k /work/configs/train-512k.yaml
+```
+
+The launcher checks source hashes, pinned core versions, all training/model YAML fields, local model/data registration, and that the output directory is new. It sets `USE_MCA=1`, eight processes, the intended source paths, packaged NVIDIA library paths, and `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` as in the reference environment. Then it replaces itself with the foreground training process. The preflight deliberately hides GPUs only in its own child process and never loads model weights; training retains all eight GPUs.
+
+In tmux, run in the foreground of the designated pane with stdout/stderr attached. Do not add `tee`, output redirection, or background launchers. Persist output separately with tmux-native pane capture if needed.
 
 The reference job also supplied `PYTHONWARNINGS=ignore::UserWarning` and `TORCH_CPP_LOG_LEVEL=ERROR` to reduce known warning noise. They are omitted here so diagnostic warnings remain visible. A one-time Dynamo recompilation/fallback warning is not itself evidence of failure. The first step log may be delayed by compilation and 64 accumulated microbatches; inspect actual exceptions and progress before intervening.
+
+## Verification boundary
+
+The bundle is checked by reconstructing separate clean source checkouts, applying the packaged patch, comparing all six patched files byte-for-byte with the reference implementation, and running CPU tests and a CPU-only import/config preflight. The reference installed environment also passes `pip check`; installed Megatron-Core, Transformer Engine Torch, FLA, and FLA Core Python sources were checked against their distribution RECORD hashes without finding additional local edits.
+
+The CPU regression tests cover the bundle hashes, label/loss-weight shifting, EP/variable-length padding, and the epoch-padding sampler:
+
+```bash
+CUDA_VISIBLE_DEVICES='' MCA_512K_ADAPTER=/work/src/roll-qwen35-512k \
+  /work/venvs/qwen35-512k/bin/python -B -m unittest discover -s tests/train -p test_mca_512k_bundle.py -v
+```
+
+These checks use existing installed dependencies with clean **source** checkouts. A fresh package installation/build and an isolated eight-GPU optimizer step have not been executed as part of packaging, because the training environment and GPUs must remain untouched. The files needed to reconstruct the implementation are now included; this is not a claim that a fresh-machine GPU acceptance test or the complete training/export/evaluation chain has passed.
 
 ## Saving and later export
 
@@ -79,4 +127,4 @@ There are no intermediate checkpoints or optimizer state for an exact interrupte
 
 ## Sharing safely
 
-The example uses generic paths and dataset/run names without credentials, data, checkpoints, environment dumps, or private conversion metadata. Review the intended diff before committing; do not stage the entire working tree. Exclude active run configs, unrelated experiments, generated dependencies, logs, and model outputs.
+The example uses generic paths and dataset/run names without credentials, data, checkpoints, environment dumps, or private conversion metadata. Review the intended diff before committing; do not stage the entire working tree. Exclude active run configs, unrelated experiments, generated dependencies, logs, and model outputs. The intentionally included workflow source and adapter patch are the implementation required by this recipe.

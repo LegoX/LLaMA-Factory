@@ -1,0 +1,464 @@
+diff --git a/mcore_adapter/src/mcore_adapter/models/model_factory.py b/mcore_adapter/src/mcore_adapter/models/model_factory.py
+index 36ea6b6a8390db912f73889adf725fed36e2255e..08b5fdcec8548d787335ba80850b61df3ca38927 100644
+--- a/mcore_adapter/src/mcore_adapter/models/model_factory.py
++++ b/mcore_adapter/src/mcore_adapter/models/model_factory.py
+@@ -422,16 +422,92 @@ class McaGPTModel(GPTModel, PretrainedModel):
+             Tensor: Loss tensor of dimensions [batch size, sequence_length]
+         """
+ 
+-        if self.config.cross_entropy_loss_fusion and self.config.tensor_model_parallel_size == 1:
+-            from ..parallel_functions.fused_cross_entropy import cross_entropy
+-
+-            s, b, d = logits.shape
+-
+-            # [b, s]
+-            labels = labels.transpose(0, 1).contiguous().view(-1)
+-            logits = logits.view(-1, d)
+-            # loss = fused_vocab_parallel_cross_entropy(logits, labels)
+-            loss = cross_entropy(logits, labels, reduction="none", ignore_index=-100)
+-            loss = loss.view(s, b).transpose(0, 1).contiguous()
+-            return loss
++        if self.config.cross_entropy_loss_fusion:
++            if self.config.tensor_model_parallel_size == 1:
++                from ..parallel_functions.fused_cross_entropy import cross_entropy
++
++                s, b, d = logits.shape
++
++                # [b, s]
++                labels = labels.transpose(0, 1).contiguous().view(-1)
++                logits = logits.view(-1, d)
++                loss = cross_entropy(logits, labels, reduction="none", ignore_index=-100)
++                loss = loss.view(s, b).transpose(0, 1).contiguous()
++                return loss
++
++            labels = labels.transpose(0, 1).contiguous()
++            if self.config.cross_entropy_fusion_impl == "native":
++                from megatron.core.fusions.fused_cross_entropy import (
++                    fused_vocab_parallel_cross_entropy,
++                )
++
++                loss = fused_vocab_parallel_cross_entropy(logits, labels, self.pg_collection.tp)
++            else:
++                from transformer_engine.pytorch import parallel_cross_entropy
++
++                loss = parallel_cross_entropy(
++                    logits,
++                    labels,
++                    dist_process_group=self.pg_collection.tp,
++                    ignore_idx=-100,
++                )
++            return loss.transpose(0, 1).contiguous()
+         return super().compute_language_model_loss(labels, logits)
++
++    def chunked_vocab_parallel_output_processor(
++        self,
++        *,
++        hidden_states: torch.Tensor,
++        output_layer: torch.nn.Module,
++        output_weight: Optional[torch.Tensor],
++        labels: torch.Tensor,
++        runtime_gather_output: Optional[bool],
++        compute_language_model_loss,
++        scale_logits,
++        **kwargs,
++    ) -> torch.Tensor:
++        # Bound peak logits/softmax memory while preserving vocab-parallel loss semantics.
++        from torch.utils.checkpoint import checkpoint
++
++        tp_size = self.config.tensor_model_parallel_size
++        local_sequence_length = hidden_states.size(0)
++        assert output_layer.sequence_parallel
++        assert labels.size(1) == local_sequence_length * tp_size
++
++        global_chunk_size = 8192
++        local_chunk_size = max(global_chunk_size // tp_size, 1)
++        losses_by_tp_rank = [[] for _ in range(tp_size)]
++
++        for start in range(0, local_sequence_length, local_chunk_size):
++            end = min(start + local_chunk_size, local_sequence_length)
++            chunk_length = end - start
++            chunk_labels = torch.cat(
++                [
++                    labels[:, rank * local_sequence_length + start : rank * local_sequence_length + end]
++                    for rank in range(tp_size)
++                ],
++                dim=1,
++            ).contiguous()
++
++            def compute_chunk(chunk_hidden_states, labels_for_chunk):
++                chunk_logits, _ = output_layer(
++                    chunk_hidden_states,
++                    weight=output_weight,
++                    runtime_gather_output=runtime_gather_output,
++                )
++                chunk_logits = scale_logits(chunk_logits)
++                return compute_language_model_loss(labels_for_chunk, chunk_logits)
++
++            chunk_loss = checkpoint(
++                compute_chunk,
++                hidden_states[start:end],
++                chunk_labels,
++                use_reentrant=False,
++            )
++            for rank, rank_loss in enumerate(chunk_loss.split(chunk_length, dim=1)):
++                losses_by_tp_rank[rank].append(rank_loss)
++
++        return torch.cat(
++            [torch.cat(rank_losses, dim=1) for rank_losses in losses_by_tp_rank],
++            dim=1,
++        )
+diff --git a/mcore_adapter/src/mcore_adapter/models/qwen3_5/config_qwen3_5.py b/mcore_adapter/src/mcore_adapter/models/qwen3_5/config_qwen3_5.py
+index 78503f42c9c2f427f78320f7e9ca946af8d48d16..64d2d2daa0689d745b602761ffc22048b7602a38 100644
+--- a/mcore_adapter/src/mcore_adapter/models/qwen3_5/config_qwen3_5.py
++++ b/mcore_adapter/src/mcore_adapter/models/qwen3_5/config_qwen3_5.py
+@@ -12,6 +12,15 @@ from ..model_config import McaModelConfig
+ class Qwen3_5Config(McaModelConfig):
+     """Qwen3_5Config"""
+ 
++    mrope_yarn_enabled: bool = False
++    yarn_rotary_scaling_factor: float = 4.0
++    yarn_original_max_position_embeddings: int = 32768
++    yarn_beta_fast: float = 32.0
++    yarn_beta_slow: float = 1.0
++    yarn_mscale: float = 1.0
++    yarn_mscale_all_dim: float = 0.0
++    yarn_correction_range_round_to_int: bool = True
++
+     # Gated Delta Net specific (for linear attention layers)
+     layer_types: Optional[list[str]] = None
+ 
+diff --git a/mcore_adapter/src/mcore_adapter/models/qwen3_5/modeling_qwen3_5.py b/mcore_adapter/src/mcore_adapter/models/qwen3_5/modeling_qwen3_5.py
+index 4bd79fb7c6be0291d28d103a73b519b4f48af331..dd348d17ec559faf8e7752e5f9fd7774160f3418 100644
+--- a/mcore_adapter/src/mcore_adapter/models/qwen3_5/modeling_qwen3_5.py
++++ b/mcore_adapter/src/mcore_adapter/models/qwen3_5/modeling_qwen3_5.py
+@@ -34,6 +34,19 @@ class Qwen3_5McaGPTModel(McaGPTModel):
+             rotary_interleaved=self.config.rotary_interleaved,
+             seq_len_interpolation_factor=seq_len_interpolation_factor,
+             rotary_base=self.config.rotary_base,
++            yarn_scaling_factor=(
++                self.config.yarn_rotary_scaling_factor
++                if self.config.mrope_yarn_enabled
++                else None
++            ),
++            yarn_original_max_position_embeddings=getattr(
++                self.config, "yarn_original_max_position_embeddings", 4096
++            ),
++            yarn_beta_fast=getattr(self.config, "yarn_beta_fast", 32.0),
++            yarn_beta_slow=getattr(self.config, "yarn_beta_slow", 1.0),
++            yarn_correction_range_round_to_int=getattr(
++                self.config, "yarn_correction_range_round_to_int", True
++            ),
+         )
+         self.mrope_section = self.config.mrope_section
+         assert self.mrope_section is not None, (
+@@ -229,10 +242,12 @@ class Qwen3_5Model(Qwen3_5McaGPTModel, MultimodalEmbeddingMixin):
+         return encoder_small_batch_size_gather(output_features)
+ 
+     def get_batch_on_this_cp_rank(self, batch, dim3_keys: list[str] = ["attention_mask"]):
+-        # VLM forward() handles input_ids and attention_mask splitting internally
++        # VLM forward() handles input_ids, attention_mask, and position_ids splitting internally.
++        # Keeping full position_ids here avoids a second CP split in MRoPE generation.
+         skipped = {}
+-        for key in ("input_ids", "attention_mask"):
+-            if key in batch:
++        cp_keys = {"labels", "loss_weights"}
++        for key in tuple(batch):
++            if key not in cp_keys:
+                 skipped[key] = batch.pop(key)
+         batch = super().get_batch_on_this_cp_rank(batch, dim3_keys=dim3_keys)
+         batch.update(skipped)
+@@ -285,6 +300,13 @@ class Qwen3_5Model(Qwen3_5McaGPTModel, MultimodalEmbeddingMixin):
+         force_vit_video = kwargs.pop("force_vit_video", False)
+         packed_seq_params = kwargs.get("packed_seq_params", None)
+ 
++        if (
++            labels is not None
++            and self.config.cross_entropy_loss_fusion
++            and self.config.tensor_model_parallel_size > 1
++        ):
++            kwargs.setdefault("output_processor", self.chunked_vocab_parallel_output_processor)
++
+         if (
+                 position_ids is None or (self.config.mtp_num_layers is not None and self.config.mtp_num_layers > 0)
+         ) and input_ids is not None:
+diff --git a/mcore_adapter/src/mcore_adapter/models/qwen3_vl/rope_utils.py b/mcore_adapter/src/mcore_adapter/models/qwen3_vl/rope_utils.py
+index 25629caa8bceff46e60df291fd5d2dd82e7066b7..24961d79d3d8d44841be2a8095c50626f32586cf 100644
+--- a/mcore_adapter/src/mcore_adapter/models/qwen3_vl/rope_utils.py
++++ b/mcore_adapter/src/mcore_adapter/models/qwen3_vl/rope_utils.py
+@@ -6,6 +6,10 @@ from megatron.core.models.common.embeddings.rope_utils import (
+     _apply_rotary_pos_emb_bshd,
+     get_pos_emb_on_this_cp_rank,
+ )
++from megatron.core.models.common.embeddings.yarn_rotary_pos_embedding import (
++    _yarn_find_correction_range,
++    _yarn_linear_ramp_mask,
++)
+ from torch import Tensor, nn
+ 
+ from .config_qwen3_vl import Qwen3VLConfig
+@@ -37,6 +41,11 @@ class Qwen3VLMultimodalRotaryEmbedding(nn.Module):
+         seq_len_interpolation_factor: float = None,
+         rotary_base: int = 10000,
+         cp_group: Optional[torch.distributed.ProcessGroup] = None,
++        yarn_scaling_factor: Optional[float] = None,
++        yarn_original_max_position_embeddings: int = 4096,
++        yarn_beta_fast: float = 32.0,
++        yarn_beta_slow: float = 1.0,
++        yarn_correction_range_round_to_int: bool = True,
+     ) -> None:
+         super().__init__()
+ 
+@@ -47,9 +56,25 @@ class Qwen3VLMultimodalRotaryEmbedding(nn.Module):
+         assert not self.rotary_interleaved, "Qwen3VLMultimodalRotaryEmbedding does not support rotary_interleaved"
+ 
+         self.seq_len_interpolation_factor = seq_len_interpolation_factor
+-        self.inv_freq = 1.0 / (
++        inv_freq_extra = 1.0 / (
+             rotary_base ** (torch.arange(0, dim, 2, dtype=torch.float32, device=torch.cuda.current_device()) / dim)
+         )
++        if yarn_scaling_factor is not None:
++            inv_freq_inter = inv_freq_extra / yarn_scaling_factor
++            low, high = _yarn_find_correction_range(
++                yarn_beta_fast,
++                yarn_beta_slow,
++                dim,
++                rotary_base,
++                yarn_original_max_position_embeddings,
++                yarn_correction_range_round_to_int,
++            )
++            inv_freq_mask = 1.0 - _yarn_linear_ramp_mask(
++                low, high, dim // 2, device=inv_freq_extra.device
++            ).to(dtype=torch.float32)
++            self.inv_freq = inv_freq_inter * (1 - inv_freq_mask) + inv_freq_extra * inv_freq_mask
++        else:
++            self.inv_freq = inv_freq_extra
+ 
+         self.cp_group = (
+             cp_group if cp_group is not None else parallel_state.get_context_parallel_group(check_initialized=False)
+@@ -173,10 +198,14 @@ def apply_rotary_pos_emb_absolute(
+         **kwargs: Ignored (absorbs ``mscale``, ``cp_group`` from caller).
+     """
+     if cu_seqlens is None:
+-        return _apply_rotary_pos_emb_bshd(t, freqs, rotary_interleaved=config.rotary_interleaved)
+-    return _apply_rotary_pos_emb_thd_absolute(
+-        t, cu_seqlens, freqs, rotary_interleaved=config.rotary_interleaved
+-    )
++        result = _apply_rotary_pos_emb_bshd(t, freqs, rotary_interleaved=config.rotary_interleaved)
++    else:
++        result = _apply_rotary_pos_emb_thd_absolute(
++            t, cu_seqlens, freqs, rotary_interleaved=config.rotary_interleaved
++        )
++    if getattr(config, "mrope_yarn_enabled", False):
++        result = result * kwargs.get("mscale", 1.0)
++    return result
+ 
+ # copy from transformers==4.57.0
+ def get_rope_index(
+diff --git a/mcore_adapter/src/mcore_adapter/trainer/trainer.py b/mcore_adapter/src/mcore_adapter/trainer/trainer.py
+index 8c4bad27d4d7b1da0a7970758566d254f2d14a9e..674173a8193f557184a6a7e9917df9b7577970d1 100644
+--- a/mcore_adapter/src/mcore_adapter/trainer/trainer.py
++++ b/mcore_adapter/src/mcore_adapter/trainer/trainer.py
+@@ -83,6 +83,37 @@ if is_peft_available():
+ logger = get_logger(__name__)
+ 
+ 
++class PaddedSequentialSampler(SequentialSampler):
++    """Sequentially cover the dataset, then rotate padding across epochs to fill optimizer steps."""
++
++    def __init__(self, data_source: Dataset, multiple: int):
++        super().__init__(data_source)
++        if multiple <= 0:
++            raise ValueError(f"multiple must be positive, got {multiple}")
++        self.multiple = multiple
++        self.epoch = 0
++
++    def __iter__(self):
++        dataset_size = len(self.data_source)
++        if dataset_size == 0:
++            return iter(())
++        padded_size = len(self)
++        padding_size = padded_size - dataset_size
++        padding_start = (self.epoch * padding_size) % dataset_size
++        indices = list(range(dataset_size))
++        indices.extend((padding_start + offset) % dataset_size for offset in range(padding_size))
++        return iter(indices)
++
++    def __len__(self):
++        dataset_size = len(self.data_source)
++        if dataset_size == 0:
++            return 0
++        return math.ceil(dataset_size / self.multiple) * self.multiple
++
++    def set_epoch(self, epoch: int):
++        self.epoch = epoch
++
++
+ class McaTrainer(Trainer):
+     metrics_keys = ["loss"]
+     _language_input_names = ["input_ids", "attention_mask", "labels", "position_ids"]
+@@ -195,7 +226,11 @@ class McaTrainer(Trainer):
+         if not isinstance(train_dataset, torch.utils.data.IterableDataset):
+             if not self.args.dataloader_drop_last:
+                 logger.warning("Currently, train dataloader drop_last must be set to True!")
+-            dataloader_params["sampler"] = SequentialSampler(train_dataset)
++            if self.args.pad_train_samples_to_full_steps:
++                samples_per_step = self.args.per_device_train_batch_size * self.args.gradient_accumulation_steps
++                dataloader_params["sampler"] = PaddedSequentialSampler(train_dataset, samples_per_step)
++            else:
++                dataloader_params["sampler"] = SequentialSampler(train_dataset)
+             dataloader_params["drop_last"] = True
+             dataloader_params["worker_init_fn"] = lambda _: set_seed(torch.initial_seed() % 2**32)
+             dataloader_params["prefetch_factor"] = self.args.dataloader_prefetch_factor
+@@ -268,7 +303,9 @@ class McaTrainer(Trainer):
+ 
+     def _pre_compute_loss(self, data_iterator: Iterator, model: DistributedDataParallel):
+         inputs = self._prepare_train_inputs(data_iterator)
+-        loss_mask = (inputs["labels"] != IGNORE_INDEX).float()
++        label_mask = (inputs["labels"] != IGNORE_INDEX).float()
++        loss_weights = inputs.pop("loss_weights", None)
++        loss_mask = label_mask if loss_weights is None else loss_weights.float() * label_mask
+         if "loss_mask" not in inputs:
+             inputs["loss_mask"] = loss_mask
+         output_tensor = model(**inputs)
+@@ -511,6 +548,7 @@ class McaTrainer(Trainer):
+             bf16=self.args.bf16,
+             params_dtype=params_dtype,
+             use_distributed_optimizer=self.args.use_distributed_optimizer,
++            use_precision_aware_optimizer=self.args.use_precision_aware_optimizer,
+             clip_grad=self.args.max_grad_norm,
+             optimizer_cpu_offload=self.args.optimizer_cpu_offload,
+             optimizer_offload_fraction=self.args.optimizer_offload_fraction,
+@@ -787,7 +825,15 @@ class McaTrainer(Trainer):
+                 model_config.grad_sync_func = [model_wrapped.start_grad_sync for model_wrapped in self.models_wrapped]
+                 if len(self.models_wrapped) == 1:
+                     model_config.grad_sync_func = model_config.grad_sync_func[0]
+-        model_config.finalize_model_grads_func = finalize_model_grads
++        if self.args.empty_cache_before_grad_sync:
++
++            def finalize_model_grads_with_cache_release(*args, **kwargs):
++                torch.cuda.empty_cache()
++                return finalize_model_grads(*args, **kwargs)
++
++            model_config.finalize_model_grads_func = finalize_model_grads_with_cache_release
++        else:
++            model_config.finalize_model_grads_func = finalize_model_grads
+         return (
+             epochs_trained,
+             num_train_epochs,
+@@ -800,10 +846,8 @@ class McaTrainer(Trainer):
+         )
+ 
+     def _get_train_cyclic_iterator(self, train_dataloader):
+-        while True:
+-            for x in train_dataloader:
+-                yield x
+-            self.control.should_epoch_stop = True
++        for x in train_dataloader:
++            yield x
+ 
+     def _inner_training_loop(
+         self, batch_size=None, args=None, resume_from_checkpoint=None, trial=None, ignore_keys_for_eval=None
+@@ -861,6 +905,8 @@ class McaTrainer(Trainer):
+                 if step_iterator is None:
+                     break
+                 step += 1
++                if args.benchmark_log_peak_memory and torch.cuda.is_available():
++                    torch.cuda.reset_peak_memory_stats()
+                 if rng_to_sync:
+                     self._load_rng_state(resume_from_checkpoint)
+                     rng_to_sync = False
+@@ -895,6 +941,20 @@ class McaTrainer(Trainer):
+                     "num_zeros_in_grad": num_zeros_in_grad or 0,
+                     "token_per_sec_per_gpu": token_per_sec_per_gpu,
+                 }
++                if args.benchmark_log_peak_memory and torch.cuda.is_available():
++                    peak_memory = torch.tensor(
++                        [torch.cuda.max_memory_allocated(), torch.cuda.max_memory_reserved()],
++                        dtype=torch.float64,
++                        device=args.device,
++                    )
++                    if dist.is_initialized():
++                        dist.all_reduce(peak_memory, op=dist.ReduceOp.MAX)
++                    logs.update(
++                        {
++                            "peak_cuda_allocated_gib": peak_memory[0].item() / (1024**3),
++                            "peak_cuda_reserved_gib": peak_memory[1].item() / (1024**3),
++                        }
++                    )
+                 self._maybe_log_save_evaluate(
+                     tr_loss,
+                     grad_norm,
+diff --git a/mcore_adapter/src/mcore_adapter/training_args.py b/mcore_adapter/src/mcore_adapter/training_args.py
+index f7c379bc94d76b05acc3355da97d4404cc59633d..c25d67809741e4d6dd14ac8b98c4f9f572e9a812 100644
+--- a/mcore_adapter/src/mcore_adapter/training_args.py
++++ b/mcore_adapter/src/mcore_adapter/training_args.py
+@@ -319,9 +319,11 @@ class DistributingParallelArguments:
+ 
+ @dataclass
+ class MegatronArguments(DistributingParallelArguments):
+-    accumulate_allreduce_grads_in_fp32: bool = field(
+-        default=False,
+-        metadata={"help": "Gradient accumulation and all-reduce in fp32."},
++    accumulate_allreduce_grads_in_fp32: Optional[bool] = field(
++        default=None,
++        metadata={
++            "help": "Gradient accumulation and all-reduce in fp32. Defaults to true for bf16 training."
++        },
+     )
+     use_distributed_optimizer: bool = field(
+         default=False,
+@@ -366,8 +368,32 @@ class MegatronArguments(DistributingParallelArguments):
+             "to ensure collectives do not become latency-bound)."
+         },
+     )
++    empty_cache_before_grad_sync: bool = field(
++        default=False,
++        metadata={
++            "help": "Release unused cached CUDA memory after backward and before final gradient synchronization."
++        },
++    )
++    pad_train_samples_to_full_steps: bool = field(
++        default=False,
++        metadata={
++            "help": "Pad each training epoch to a full gradient-accumulation step using rotating samples."
++        },
++    )
++    benchmark_skip_final_save: bool = field(
++        default=False,
++        metadata={"help": "Skip the final model save for disposable benchmark runs."},
++    )
++    benchmark_log_peak_memory: bool = field(
++        default=False,
++        metadata={"help": "Log the maximum CUDA allocated and reserved memory across ranks for each step."},
++    )
+ 
+     optimizer: str = field(default="adam", metadata={"help": "Optimizer function: [adam, sgd]"})
++    use_precision_aware_optimizer: bool = field(
++        default=False,
++        metadata={"help": "Whether to use Megatron's precision-aware optimizer path."},
++    )
+     optimizer_cpu_offload: bool = field(
+         default=False, metadata={"help": "Whether offload optimizer states tensor and compute to CPU."}
+     )
+@@ -429,8 +455,8 @@ class MegatronArguments(DistributingParallelArguments):
+ @dataclass
+ class TrainingArguments(MegatronArguments, HFTrainingArguments):
+     def __post_init__(self):
+-        if self.bf16:
+-            self.accumulate_allreduce_grads_in_fp32 = True
++        if self.accumulate_allreduce_grads_in_fp32 is None:
++            self.accumulate_allreduce_grads_in_fp32 = self.bf16
+ 
+         self.deepspeed = None
+         MegatronArguments.__post_init__(self)
+@@ -442,8 +468,8 @@ class TrainingArguments(MegatronArguments, HFTrainingArguments):
+ @dataclass
+ class Seq2SeqTrainingArguments(MegatronArguments, HFSeq2SeqTrainingArguments):
+     def __post_init__(self):
+-        if self.bf16:
+-            self.accumulate_allreduce_grads_in_fp32 = True
++        if self.accumulate_allreduce_grads_in_fp32 is None:
++            self.accumulate_allreduce_grads_in_fp32 = self.bf16
+ 
+         self.deepspeed = None
+         MegatronArguments.__post_init__(self)

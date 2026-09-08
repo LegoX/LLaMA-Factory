@@ -1,0 +1,34 @@
+{
+  "upstream": "https://github.com/alibaba/ROLL.git",
+  "base_commit": "192b1a01ea61c113b2deb543f7b115783038dff8",
+  "patch_sha256": "bf1b6e81d4018314c2857ef8b041062aa40aa99d77d5bbaee6bd1255bf744599",
+  "files": {
+    "mcore_adapter/src/mcore_adapter/models/model_factory.py": {
+      "base_sha256": "88ae7a5f0ce3a51158de2993ee7947e4e0b0ccfd39d2ba3dbea7ee6a692e392b",
+      "patched_sha256": "cdd3ec53a1d589afa38c4fa0877bd0a0485a9493999dd1f29c4cea182d17d550"
+    },
+    "mcore_adapter/src/mcore_adapter/models/qwen3_5/config_qwen3_5.py": {
+      "base_sha256": "6eac372175481b431d431560dde538f3e3e1dd3260bc7377319c4bd9d24cc1e8",
+      "patched_sha256": "83d0042b9bee4b0ce9114b93e2dbed96043d5509f0250d16bda1b44354a0e8ac"
+    },
+    "mcore_adapter/src/mcore_adapter/models/qwen3_5/modeling_qwen3_5.py": {
+      "base_sha256": "ed0842403b69da335be850a0fc4d06a949556828fb101d746c9cf29b597b926f",
+      "patched_sha256": "f00dce1e854d6f21c408cd9fba33c39bd14fe49bccaaf279448a0ed77540122d"
+    },
+    "mcore_adapter/src/mcore_adapter/models/qwen3_vl/rope_utils.py": {
+      "base_sha256": "1f610632bb0fb047161a23415be7c6d1b6feb68e3ebd5e49bac7abe1f40a74dd",
+      "patched_sha256": "fa81c77ea9005f25b8c9a78f67f142f691c6f2c0e9a95aeeb2d0c439e9209960"
+    },
+    "mcore_adapter/src/mcore_adapter/trainer/trainer.py": {
+      "base_sha256": "f8c520d2c1db436aa040f656b429c059d78a89f6a12e228a1c20b0e088b695bf",
+      "patched_sha256": "e6e9db81d9dcfc1d824b75f2b357f78094649acba4cde0171656d78678abfad5"
+    },
+    "mcore_adapter/src/mcore_adapter/training_args.py": {
+      "base_sha256": "5630d167c9b3240bc770b98f4535361b1a84e5f275f0c877160a1fb209615d9b",
+      "patched_sha256": "1497d000afdadf2c02f33e2082bfe0a0975862b2a45a4e76f5176ee43af711e8"
+    }
+  },
+  "llamafactory_files": {
+    "src/llamafactory/train/mca/workflow.py": "28f943faf8abbafb1f365e37b6022644cc880c8475f5097543463ea300dbc890"
+  }
+}

@@ -69,6 +69,8 @@ def _data_collator_wrapper(data_collator: Any):
                 feature["labels"] = deepcopy(feature["input_ids"])[1:]
             for k in labels_key:
                 feature[k] = feature[k][1:]
+            if "loss_weights" in feature:
+                feature["loss_weights"] = feature["loss_weights"][1:]
             for k in input_ids_key:
                 feature[k] = feature[k][:-1]
             for k in ["attention_mask", "position_ids"]:
@@ -240,7 +242,11 @@ def run_sft(
     # optional freezing for qwen_vl series
     _freeze_model_parameters(model, finetuning_args)
 
-    pad_to_max = training_args.expert_model_parallel_size is not None and training_args.expert_model_parallel_size > 1
+    pad_to_max = (
+        training_args.expert_model_parallel_size is not None
+        and training_args.expert_model_parallel_size > 1
+        and not training_args.variable_seq_lengths
+    )
     data_collator = SFTDataCollatorWith4DAttentionMask(
         template=template,
         model=collator_model,
@@ -265,7 +271,8 @@ def run_sft(
         trainer.add_callback(SaveProcessorCallback(tokenizer_module["processor"]))
 
     train_result = trainer.train(training_args.resume_from_checkpoint)
-    trainer.save_model()
+    if not training_args.benchmark_skip_final_save:
+        trainer.save_model()
     trainer.log_metrics("train", train_result.metrics)
     trainer.save_metrics("train", train_result.metrics)
     trainer.save_state()
