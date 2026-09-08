@@ -79,6 +79,7 @@ https://github.com/user-attachments/assets/43b700c6-a178-41db-b1f8-8190a5d3fcfc
   - [安装 LLaMA Factory](#安装-llama-factory)
   - [数据准备](#数据准备)
   - [快速开始](#快速开始)
+  - [Qwen3.5 512K 训练](#qwen35-512k-训练)
   - [LLaMA Board 可视化微调](#llama-board-可视化微调由-gradio-驱动)
   - [LLaMA Factory Online 在线微调](#llama-factory-online-在线微调)
   - [构建 Docker](#构建-docker)
@@ -714,6 +715,12 @@ llamafactory-cli export examples/merge_lora/qwen3_lora_sft.yaml
 > 使用 `llamafactory-cli help` 显示帮助信息。
 >
 > 遇到报错请先看[常见问题](https://github.com/hiyouga/LLaMA-Factory/issues/4614)。
+
+### Qwen3.5 512K 训练
+
+单机 **8×H200** 上 Qwen3.5-35B-A3B-Base 全参数 SFT 的用法见 [512K 训练说明](examples/megatron/README_512k.md)和[脱敏示例](examples/megatron/qwen3_5_35b_a3b_base_512k_yarn.yaml)。使用 `USE_MCA=1` 的 **mcore_adapter / Megatron-Core**，而非 Megatron Bridge；采用 TP2 / PP2 / CP2 / EP4 / ETP1、YaRN factor 2、BF16 计算、FP32 梯度累积及 75% optimizer CPU offload。
+
+必须具备说明中列出的本地扩展，不能只安装原版依赖再复制 YAML。已观察到 optimizer step 完成，但不代表完整训练、HF 导出和评测均已验证。使用前替换路径并注册数据集；不要在已有任务占用的 GPU 上启动。
 
 ### LLaMA Board 可视化微调（由 [Gradio](https://github.com/gradio-app/gradio) 驱动）
 
