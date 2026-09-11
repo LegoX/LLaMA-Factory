@@ -1,0 +1,82 @@
+model_name_or_path: /public/storage/conghao/models/Qwen3.5-35B-A3B-Base
+trust_remote_code: true
+
+stage: sft
+do_train: true
+do_eval: false
+finetuning_type: full
+
+dataset_dir: /public/storage/conghao/swe_data_process/production/programgen_glm53_flash_fp8_without_binary_reward_top1000_quality_v4_20260911
+dataset: programgen_glm53_flash_fp8_without_binary_reward_top1000_quality_v4_20260911
+tokenized_path: /public/storage/conghao/LLaMA-Factory/.cache/huggingface/datasets/glm53_without1000_v4_20260911/tokenized
+template: qwen3_6
+cutoff_len: 524288
+packing: false
+overwrite_cache: false
+preprocessing_num_workers: 16
+dataloader_num_workers: 0
+pad_train_samples_to_full_steps: true
+
+output_dir: /public/storage/conghao/LLaMA-Factory/saves/glm53_without1000_v4_ep5_20260911
+logging_steps: 1
+save_strategy: epoch
+save_total_limit: null
+save_only_model: false
+save_hf_model: false
+plot_loss: true
+report_to: none
+run_name: glm53_without1000_v4_ep5_20260911
+
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 64
+learning_rate: 5.0e-5
+weight_decay: 0.01
+max_grad_norm: 1.0
+max_steps: 80
+num_train_epochs: 5
+lr_scheduler_type: cosine
+warmup_ratio: 0.1
+lr_scheduler_kwargs:
+  lr_decay_steps: 80
+bf16: true
+accumulate_allreduce_grads_in_fp32: true
+ddp_timeout: 180000000
+resume_from_checkpoint: null
+ignore_data_skip: false
+seed: 42
+data_seed: 42
+
+tensor_model_parallel_size: 2
+pipeline_model_parallel_size: 2
+context_parallel_size: 2
+expert_model_parallel_size: 4
+expert_tensor_parallel_size: 1
+sequence_parallel: true
+variable_seq_lengths: true
+transformer_impl: transformer_engine
+cross_entropy_loss_fusion: true
+recompute_granularity: full
+use_distributed_optimizer: true
+use_precision_aware_optimizer: true
+optimizer_cpu_offload: true
+optimizer_offload_fraction: 0.75
+overlap_param_gather: false
+overlap_grad_reduce: false
+empty_cache_before_grad_sync: true
+moe_grouped_gemm: true
+moe_token_dispatcher_type: alltoall
+ckpt_format: torch_dist
+additional_configs:
+  max_sequence_length: 524288
+  fine_grained_activation_offloading: false
+  offload_modules:
+    - expert_fc1
+    - moe_act
+  position_embedding_type: mrope
+  mrope_yarn_enabled: true
+  yarn_rotary_scaling_factor: 2.0
+  yarn_original_max_position_embeddings: 262144
+  yarn_beta_fast: 32.0
+  yarn_beta_slow: 1.0
+  yarn_mscale: 1.0
+  yarn_mscale_all_dim: 0.0

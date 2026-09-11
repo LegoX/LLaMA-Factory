@@ -36,15 +36,19 @@ def configure_rope(config: "PretrainedConfig", model_args: "ModelArguments") -> 
     if model_args.rope_scaling is None:
         return
 
-    if not hasattr(config, "rope_scaling"):
+    rope_config = config
+    if getattr(config, "model_type", None) in ["qwen3_5", "qwen3_5_moe"]:
+        rope_config = getattr(config, "text_config", config)
+
+    if not hasattr(rope_config, "rope_scaling"):
         logger.warning_rank0("Current model does not support RoPE scaling.")
         return
 
-    rope_scaling = getattr(config, "rope_scaling", None)
+    rope_scaling = getattr(rope_config, "rope_scaling", None)
     if isinstance(rope_scaling, dict) and "original_max_position_embeddings" in rope_scaling:
         old_max_length = rope_scaling["original_max_position_embeddings"]
-    elif hasattr(config, "max_position_embeddings"):
-        old_max_length = getattr(config, "max_position_embeddings", None)
+    elif hasattr(rope_config, "max_position_embeddings"):
+        old_max_length = getattr(rope_config, "max_position_embeddings", None)
     else:
         logger.warning_rank0("Cannot find the max position embeddings in the config.")
         return
@@ -64,12 +68,16 @@ def configure_rope(config: "PretrainedConfig", model_args: "ModelArguments") -> 
     else:  # inference
         rope_factor = 2.0
 
-    rope_kwargs = {
-        "rope_type": getattr(model_args.rope_scaling, "value", model_args.rope_scaling),  # handle enum
-        "factor": rope_factor,
-    }
-    setattr(config, "max_position_embeddings", old_max_length * rope_factor)
-    logger.info_rank0(f"Enlarge max model length from {old_max_length} to {old_max_length * rope_factor}.")
+    rope_kwargs = dict(rope_scaling) if rope_config is not config and isinstance(rope_scaling, dict) else {}
+    rope_kwargs.update(
+        {
+            "rope_type": getattr(model_args.rope_scaling, "value", model_args.rope_scaling),  # handle enum
+            "factor": rope_factor,
+        }
+    )
+    new_max_length = int(old_max_length * rope_factor)
+    setattr(rope_config, "max_position_embeddings", new_max_length)
+    logger.info_rank0(f"Enlarge max model length from {old_max_length} to {new_max_length}.")
 
     if model_args.rope_scaling in [RopeScaling.DYNAMIC, RopeScaling.YARN]:
         rope_kwargs["original_max_position_embeddings"] = old_max_length
@@ -78,7 +86,9 @@ def configure_rope(config: "PretrainedConfig", model_args: "ModelArguments") -> 
         rope_kwargs["low_freq_factor"] = 1.0
         rope_kwargs["high_freq_factor"] = 4.0
 
-    setattr(config, "rope_scaling", rope_kwargs)
+    setattr(rope_config, "rope_scaling", rope_kwargs)
+    if hasattr(rope_config, "rope_parameters"):
+        setattr(rope_config, "rope_parameters", rope_kwargs)
     logger.info_rank0(
         f"Using {rope_kwargs['rope_type']} scaling strategy and setting scaling factor to {rope_kwargs['factor']}."
     )

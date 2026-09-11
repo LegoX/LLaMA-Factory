@@ -99,11 +99,10 @@ def apply_liger_kernel(
     else:
         kwargs = {}
 
-    if model_type == "qwen3_5_moe":
-        # Liger's swiglu/rms_norm class swaps for Qwen3.5-MoE cause an illegal memory
-        # access on step 2 forward under ZeRO-3 (observed on H800 + transformers 5.6.0
-        # + liger-kernel 0.8.0). Keep only fused_linear_cross_entropy, which is the
-        # part that actually resolves the long-context loss-stage OOM.
+    if model_type in ["qwen3_moe", "qwen3_5_moe"]:
+        # Liger's swiglu/rms_norm class swaps for Qwen3 MoE models can cause illegal
+        # memory accesses under ZeRO-3. Keep only fused_linear_cross_entropy, which
+        # is the part that resolves the long-context loss-stage OOM.
         kwargs.update({"swiglu": False, "rms_norm": False})
 
     apply_liger_kernel(**kwargs)
