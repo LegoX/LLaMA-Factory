@@ -43,7 +43,7 @@ def verify_adapter(adapter, apply=False):
     for name, expected in manifest["llamafactory_files"].items():
         if digest(repository / name) != expected:
             raise ValueError(f"Missing or different LLaMA-Factory integration: {name}")
-    print("Verified adapter baseline, six patched files, and LLaMA-Factory integration")
+    print("Verified adapter baseline, packaged patches, and LLaMA-Factory integration")
 
 
 def main():

@@ -1,7 +1,7 @@
 {
   "upstream": "https://github.com/alibaba/ROLL.git",
   "base_commit": "192b1a01ea61c113b2deb543f7b115783038dff8",
-  "patch_sha256": "bf1b6e81d4018314c2857ef8b041062aa40aa99d77d5bbaee6bd1255bf744599",
+  "patch_sha256": "0317ea137200bdb2789a48ffd8abedd361273d9e509df1c0d117afed53c38b9b",
   "files": {
     "mcore_adapter/src/mcore_adapter/models/model_factory.py": {
       "base_sha256": "88ae7a5f0ce3a51158de2993ee7947e4e0b0ccfd39d2ba3dbea7ee6a692e392b",
@@ -26,6 +26,10 @@
     "mcore_adapter/src/mcore_adapter/training_args.py": {
       "base_sha256": "5630d167c9b3240bc770b98f4535361b1a84e5f275f0c877160a1fb209615d9b",
       "patched_sha256": "1497d000afdadf2c02f33e2082bfe0a0975862b2a45a4e76f5176ee43af711e8"
+    },
+    "mcore_adapter/src/mcore_adapter/models/converter/model_converter.py": {
+      "base_sha256": "4c6b3f05ba0c788a9aff6b2d3cc6074b835566639dc96106aabafcf3ff894819",
+      "patched_sha256": "c3e79d78d99a3b4be347f5231c5b283f6aa163619ed9cde43f0d895c108d47cd"
     }
   },
   "llamafactory_files": {

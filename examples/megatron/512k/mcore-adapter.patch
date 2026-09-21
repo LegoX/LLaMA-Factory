@@ -1,5 +1,20 @@
+diff --git a/mcore_adapter/src/mcore_adapter/models/converter/model_converter.py b/mcore_adapter/src/mcore_adapter/models/converter/model_converter.py
+index c697445..8760e9a 100644
+--- a/mcore_adapter/src/mcore_adapter/models/converter/model_converter.py
++++ b/mcore_adapter/src/mcore_adapter/models/converter/model_converter.py
+@@ -121,6 +121,10 @@ class ModelConverter:
+         return {os.path.join(path, file) for file in needed_files}
+ 
+     def is_needed_hf_name(self, name, vp_stage: int):
++        # Some HF checkpoints include auxiliary MTP tensors even when MTP is
++        # disabled for training. Filter them before parsing expert tensor names.
++        if name.startswith("mtp.") and not self.mca_config.mtp_num_layers:
++            return False
+         mca_names = self.template.hf_name_to_mca_names(name)
+         if mca_names is None:
+             return False
 diff --git a/mcore_adapter/src/mcore_adapter/models/model_factory.py b/mcore_adapter/src/mcore_adapter/models/model_factory.py
-index 36ea6b6a8390db912f73889adf725fed36e2255e..08b5fdcec8548d787335ba80850b61df3ca38927 100644
+index 36ea6b6..08b5fdc 100644
 --- a/mcore_adapter/src/mcore_adapter/models/model_factory.py
 +++ b/mcore_adapter/src/mcore_adapter/models/model_factory.py
 @@ -422,16 +422,92 @@ class McaGPTModel(GPTModel, PretrainedModel):
@@ -108,7 +123,7 @@ index 36ea6b6a8390db912f73889adf725fed36e2255e..08b5fdcec8548d787335ba80850b61df
 +            dim=1,
 +        )
 diff --git a/mcore_adapter/src/mcore_adapter/models/qwen3_5/config_qwen3_5.py b/mcore_adapter/src/mcore_adapter/models/qwen3_5/config_qwen3_5.py
-index 78503f42c9c2f427f78320f7e9ca946af8d48d16..64d2d2daa0689d745b602761ffc22048b7602a38 100644
+index 78503f4..64d2d2d 100644
 --- a/mcore_adapter/src/mcore_adapter/models/qwen3_5/config_qwen3_5.py
 +++ b/mcore_adapter/src/mcore_adapter/models/qwen3_5/config_qwen3_5.py
 @@ -12,6 +12,15 @@ from ..model_config import McaModelConfig
@@ -128,7 +143,7 @@ index 78503f42c9c2f427f78320f7e9ca946af8d48d16..64d2d2daa0689d745b602761ffc22048
      layer_types: Optional[list[str]] = None
  
 diff --git a/mcore_adapter/src/mcore_adapter/models/qwen3_5/modeling_qwen3_5.py b/mcore_adapter/src/mcore_adapter/models/qwen3_5/modeling_qwen3_5.py
-index 4bd79fb7c6be0291d28d103a73b519b4f48af331..dd348d17ec559faf8e7752e5f9fd7774160f3418 100644
+index 4bd79fb..dd348d1 100644
 --- a/mcore_adapter/src/mcore_adapter/models/qwen3_5/modeling_qwen3_5.py
 +++ b/mcore_adapter/src/mcore_adapter/models/qwen3_5/modeling_qwen3_5.py
 @@ -34,6 +34,19 @@ class Qwen3_5McaGPTModel(McaGPTModel):
@@ -182,7 +197,7 @@ index 4bd79fb7c6be0291d28d103a73b519b4f48af331..dd348d17ec559faf8e7752e5f9fd7774
                  position_ids is None or (self.config.mtp_num_layers is not None and self.config.mtp_num_layers > 0)
          ) and input_ids is not None:
 diff --git a/mcore_adapter/src/mcore_adapter/models/qwen3_vl/rope_utils.py b/mcore_adapter/src/mcore_adapter/models/qwen3_vl/rope_utils.py
-index 25629caa8bceff46e60df291fd5d2dd82e7066b7..24961d79d3d8d44841be2a8095c50626f32586cf 100644
+index 25629ca..24961d7 100644
 --- a/mcore_adapter/src/mcore_adapter/models/qwen3_vl/rope_utils.py
 +++ b/mcore_adapter/src/mcore_adapter/models/qwen3_vl/rope_utils.py
 @@ -6,6 +6,10 @@ from megatron.core.models.common.embeddings.rope_utils import (
@@ -255,7 +270,7 @@ index 25629caa8bceff46e60df291fd5d2dd82e7066b7..24961d79d3d8d44841be2a8095c50626
  # copy from transformers==4.57.0
  def get_rope_index(
 diff --git a/mcore_adapter/src/mcore_adapter/trainer/trainer.py b/mcore_adapter/src/mcore_adapter/trainer/trainer.py
-index 8c4bad27d4d7b1da0a7970758566d254f2d14a9e..674173a8193f557184a6a7e9917df9b7577970d1 100644
+index 8c4bad2..674173a 100644
 --- a/mcore_adapter/src/mcore_adapter/trainer/trainer.py
 +++ b/mcore_adapter/src/mcore_adapter/trainer/trainer.py
 @@ -83,6 +83,37 @@ if is_peft_available():
@@ -389,7 +404,7 @@ index 8c4bad27d4d7b1da0a7970758566d254f2d14a9e..674173a8193f557184a6a7e9917df9b7
                      tr_loss,
                      grad_norm,
 diff --git a/mcore_adapter/src/mcore_adapter/training_args.py b/mcore_adapter/src/mcore_adapter/training_args.py
-index f7c379bc94d76b05acc3355da97d4404cc59633d..c25d67809741e4d6dd14ac8b98c4f9f572e9a812 100644
+index f7c379b..c25d678 100644
 --- a/mcore_adapter/src/mcore_adapter/training_args.py
 +++ b/mcore_adapter/src/mcore_adapter/training_args.py
 @@ -319,9 +319,11 @@ class DistributingParallelArguments:

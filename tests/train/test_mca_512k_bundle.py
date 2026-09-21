@@ -25,7 +25,8 @@ def load_definition(path, name, namespace):
 class BundleTests(unittest.TestCase):
     def test_checksums_and_scope(self):
         manifest = json.loads((BUNDLE / "manifest.json").read_text())
-        assert len(manifest["files"]) == 6
+        assert len(manifest["files"]) == 7
+        assert "mcore_adapter/src/mcore_adapter/models/converter/model_converter.py" in manifest["files"]
         assert hashlib.sha256((BUNDLE / "mcore-adapter.patch").read_bytes()).hexdigest() == manifest["patch_sha256"]
         for name, expected in manifest["llamafactory_files"].items():
             assert hashlib.sha256((ROOT / name).read_bytes()).hexdigest() == expected
