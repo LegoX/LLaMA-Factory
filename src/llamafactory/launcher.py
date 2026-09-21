@@ -12,10 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import os
 import subprocess
 import sys
 from copy import deepcopy
+from pathlib import Path
 
 
 USAGE = (
@@ -33,6 +35,37 @@ USAGE = (
     + "| Hint: You can use `lmf` as a shortcut for `llamafactory-cli`.      |\n"
     + "-" * 70
 )
+
+
+def _read_training_config():
+    """Resolve the same YAML/JSON overrides passed to the training workers."""
+    from omegaconf import OmegaConf
+
+    if len(sys.argv) > 1 and Path(sys.argv[1]).suffix in {".yaml", ".yml", ".json"}:
+        return OmegaConf.to_container(
+            OmegaConf.merge(OmegaConf.load(sys.argv[1]), OmegaConf.from_cli(sys.argv[2:])), resolve=True
+        )
+    return None
+
+
+def _export_after_training(config, node_rank):
+    """Run once after the distributed workers release their GPUs."""
+    if node_rank != 0 or config is None:
+        return
+    if os.environ.get("USE_MCA", "").lower() not in {"1", "true", "yes", "on"}:
+        return
+    if not config.get("do_train", False) or config.get("save_hf_model", False):
+        return
+    if config.get("benchmark_skip_final_save", False):
+        return
+    converter = Path(__file__).resolve().parents[2] / "scripts" / "megatron_merge.py"
+    env = deepcopy(os.environ)
+    env["CUDA_VISIBLE_DEVICES"] = env.get("CUDA_VISIBLE_DEVICES", "0").split(",")[0]
+    from .extras.misc import find_available_port
+
+    env["MASTER_ADDR"] = "127.0.0.1"
+    env["MASTER_PORT"] = str(find_available_port())
+    subprocess.run([sys.executable, str(converter), "--training_config", json.dumps(config)], env=env, check=True)
 
 
 def launch():
@@ -54,6 +87,9 @@ def launch():
     )
 
     command = sys.argv.pop(1) if len(sys.argv) > 1 else "help"
+    training_config = _read_training_config() if command == "train" else None
+    if training_config is not None and "use_mca" in training_config:
+        os.environ["USE_MCA"] = "1" if training_config["use_mca"] else "0"
     if is_env_enabled("USE_MCA"):  # force use torchrun
         os.environ["FORCE_TORCHRUN"] = "1"
 
@@ -131,6 +167,7 @@ def launch():
                 check=True,
             )
 
+        _export_after_training(training_config, int(node_rank))
         sys.exit(process.returncode)
 
     elif command == "api":
