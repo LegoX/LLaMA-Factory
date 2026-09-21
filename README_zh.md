@@ -543,48 +543,39 @@ pip install -r requirements/metrics.txt
 | Flash Linear Attention / Apache TVM FFI / TileLang | 0.5.1 / 0.1.11 / 0.1.11 |
 | Weights & Biases | 0.28.0 |
 
-#### Qwen3.6 35B A3B 长上下文训练适配记录
+#### Qwen / DPSK：训练、导出与 Serving
 
-为运行 256k 上下文的全参数 SFT，本地额外做了以下适配。这里不记录模型或数据集的具体绝对路径，正式训练配置见 `examples/train_full/qwen3_6_35b_a3b_499traj_sft.yaml`。
+本仓库负责数据预处理、训练及 HF 权重导出。Serving 使用独立的 SGLang 环境，评测由 Harbor / OpenHands 调用 OpenAI-compatible API；两者不需要通过 LLaMA-Factory 启动。**导出的 HF 模型目录是交接点。**
 
-- ShareGPT 数据转换与 SFT loss 计算已支持 assistant 消息上的浮点 `loss_weight`，例如 `0`、`0.3`、`0.5`、`1`，用于让不应进入监督损失的片段只参与上下文、不贡献或少贡献 loss。
-- FlashAttention-2 路径增加了 Transformers `s_aux=None` 的兼容处理，避免 Qwen3.6 MoE 在 FA2 下因 `s_aux.to(...)` 触发空值错误。
-- 正式配置使用 `flash_attn: fa2`、DeepSpeed ZeRO-3、gradient checkpointing、`cutoff_len: 262144`、`packing: false`、`save_only_model: true`。
-- 训练集 454 条、验证集 45 条，过滤后共 499 条；正式配置移除了 smoke 的 `max_samples`，并设置 `num_train_epochs: 3.0`。
-- 已做 256k 单步压力测试：8 卡、每卡 batch 1、FA2 + ZeRO-3 + gradient checkpointing 可以跑通；峰值显存约 128 GiB/卡，单卡剩余约 15 GiB，因此正式训练保持 `per_device_train_batch_size: 1`。
-- API 测评建议使用 SGLang 的 OpenAI-compatible 服务，测评端调用 `/v1/chat/completions`。
+- **训练**：当前 512K 方案使用 LLaMA-Factory → ROLL mcore_adapter → Megatron-Core，8×H200，TP2 / PP2 / CP2 / EP4 / ETP1，BF16、FP32 梯度累积、75% optimizer CPU offload。依赖固定版本环境和 adapter 补丁，见 [512K 指南](examples/megatron/README_512k.md)。
+- **数据**：上游 `swe_data_process` 提供训练数据；本仓库按训练 tokenizer/template 预处理并校验 loss mask。换数据或 tokenizer 后重新生成缓存。
+- **导出**：将 Megatron 分片转成 HF 权重，保留训练使用的 MRoPE/YaRN 配置，校验 tokenizer、chat template 和权重分片。使用配置中的 `use_mca: true`（兼容 `USE_MCA=1`）选择 Megatron；`llamafactory-cli train` 成功结束后自动转换。输出默认是 `output_dir + "-hf"`，可用 `export_dir` 指定；精度和上下文来自训练配置及 checkpoint。普通训练、`save_hf_model: true` 或跳过最终保存时不重复转换。
+- **维护**：复用现有入口，实验差异放 YAML；不再按模型名或日期复制一套 prepare/run/export/serve/eval 脚本。
 
-SGLang serving 建议使用接近 Qwen3.6 官方 tool-use 的配置，但不要启用 `--reasoning-parser qwen3`。这样会保留模型的 thinking 输出，并让 thinking 留在 `message.content` 中；同时 `qwen3_coder` tool-call parser 仍可解析标准工具调用为 top-level `tool_calls`。该设置可避免 OpenHands 收到 `content` 为空、`tool_calls` 为空、只有 `reasoning_content` 的 assistant message 后判定 no-op / stuck。
-
-示例命令如下。这里使用环境变量占位，不记录本机具体路径。
+训练复用已有入口：
 
 ```bash
-export SGLANG_ENV=/path/to/sglang/env
-export QWEN36_MODEL_DIR=/path/to/Qwen3.6-35B-A3B
-
-SGLANG_NUMA_BIND_V2=0 \
-PATH="$SGLANG_ENV/bin:$PATH" \
-sglang serve \
-  --model-path "$QWEN36_MODEL_DIR" \
-  --trust-remote-code \
-  --served-model-name qwen3_6_35b_a3b_base_sglang \
-  --host 0.0.0.0 \
-  --port 8000 \
-  --tensor-parallel-size 8 \
-  --context-length 262144 \
-  --mem-fraction-static 0.8 \
-  --tool-call-parser qwen3_coder \
-  --chat-template "$QWEN36_MODEL_DIR/chat_template.jinja"
+bash examples/megatron/512k/run.sh /path/to/train-env /path/to/ROLL-mcore-adapter /path/to/train.yaml
 ```
 
-说明：
+数据使用 YAML 的 `dataset_dir`、`dataset` 和 `tokenized_path`；已有缓存直接加载，否则由原有数据处理流程生成。无需逐实验 prepare 或 export 脚本。
 
-- `--reasoning-parser qwen3` 有意不设置；否则 SGLang 会把 thinking 拆到 `reasoning_content`，在部分 OpenHands / LiteLLM 链路中可能形成无 action 的 assistant message。
-- `--tool-call-parser qwen3_coder` 保留，用于把 Qwen XML 风格工具调用解析成 OpenAI `tool_calls`。
-- `--chat-template` 显式指向模型自带模板，避免 serving 框架自动识别模板时出现差异。
-- `SGLANG_NUMA_BIND_V2=0` 用于避开部分机器上 `numactl --membind` 失败导致 scheduler 初始化退出的问题。
-- `PATH="$SGLANG_ENV/bin:$PATH"` 确保 FlashInfer JIT 等组件可以找到 `ninja` 等环境内工具。
-- 不需要手动设置 `--fp8-gemm-backend` 或 `--moe-runner-backend`；默认 `auto` 即可。
+以下是当前已运行的 serving 配置：
+
+| 项目 | DPSK v4.1 Flash | Qwen3.6-35B-A3B Instruct |
+| --- | --- | --- |
+| 环境 | H200-1，专用 SGLang dev-cu13-dsv41 镜像解包为 rootfs | H800，独立 SGLang 0.5.12 环境 |
+| GPU | 8 卡，TP8 / EP8 | 8 卡，四个 TP2，端口 8000–8003 |
+| 上下文 | 524288 | 原版 262144；512K 微调模型使用对应 YaRN 配置 |
+| 请求上限 | 单服务 64 | 每个 TP2 为 8，共 32 |
+| Parsers | reasoning: `deepseek-v41`；tool: `deepseekv41` | reasoning: `qwen3`；tool: `qwen3_coder` |
+| 其他参数 | host Engram，显存比例 0.80，chunked prefill 8192 | 显存比例 0.88，Mamba `extra_buffer`，cache size 192 |
+
+DPSK 引擎由 Supervisor 管理；网关和 Cloudflare tunnel 用于公网访问。当前启动命令没有启用历史试验中的 W4A8、bounded replay 或 speculative decoding。部署文件位于 H200-1 的 `/public/storage/conghao/models/serving/h200-1-dsv41`。
+
+Qwen 使用模型自带 `chat_template.jinja`。在 OH1.33 中，`send_reasoning_content_models` 必须包含实际服务模型名，设置 `reasoning_replay_format="top_level"`，并通过 `litellm_extra_body.chat_template_kwargs` 传入 `preserve_thinking=true`、`enable_thinking=true`。本地 token 计数使用相同模板参数；有顶层 `reasoning_content` 时去掉重复的 `content[].thinking`。这套配置已在 Qwen3.6 链路验证；Qwen3.5 原始模板需单独确认是否支持跨用户轮次保留 thinking。
+
+四个 TP2 按 Slurm 实际分配的物理核分组，避免共用同一小组 CPU。当前 H800 启动入口是 Harbor 内的 `scripts/serve_llm/serve_qwen36_instruct_preserved_h800_20260921.sh`，eval 也从 Harbor 启动。吞吐记录需注明单 TP2/总计、上下文长度和实际生成并发。
 
 #### 从镜像安装
 

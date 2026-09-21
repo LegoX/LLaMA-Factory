@@ -22,7 +22,7 @@ The bundled [constraints](512k/constraints.txt) pin the observed installed Pytho
 
 ## Local extension checklist
 
-The LLaMA-Factory `workflow.py` integration is included in this branch. The six-file adapter implementation is included as [mcore-adapter.patch](512k/mcore-adapter.patch), against official ROLL commit `192b1a01ea61c113b2deb543f7b115783038dff8`. The [manifest](512k/manifest.json) records before/after file checksums and the LLaMA-Factory integration checksum. Applying this bundle reconstructs the adapter source used by the reference job; access to its original machine is not required. Do not patch a checkout or environment being used by a running job.
+The LLaMA-Factory `workflow.py` integration is included in this branch. The seven-file adapter implementation is included as [mcore-adapter.patch](512k/mcore-adapter.patch), against official ROLL commit `192b1a01ea61c113b2deb543f7b115783038dff8`. The [manifest](512k/manifest.json) records before/after file checksums and the LLaMA-Factory integration checksum. Applying this bundle reconstructs the adapter source used by the reference job; access to its original machine is not required. Do not patch a checkout or environment being used by a running job.
 
 | Location | Relevant local changes |
 | --- | --- |
@@ -33,8 +33,9 @@ The LLaMA-Factory `workflow.py` integration is included in this branch. The six-
 | Adapter: `mcore_adapter/src/mcore_adapter/models/qwen3_5/modeling_qwen3_5.py` | Wire YaRN into rotary embeddings and the local long-sequence output path. |
 | Adapter: `mcore_adapter/src/mcore_adapter/models/qwen3_vl/rope_utils.py` | Local YaRN frequency interpolation and rotary scaling. |
 | Adapter: `mcore_adapter/src/mcore_adapter/models/model_factory.py` | TP-aware fused cross entropy and checkpointed chunked vocabulary-parallel output processing to limit peak logits memory. |
+| Adapter: `mcore_adapter/src/mcore_adapter/models/converter/model_converter.py` | Ignore auxiliary MTP weights when MTP training is disabled. |
 
-The bundle preserves the exact six-file reference implementation, including optional loss weighting and benchmark instrumentation; those optional features need not be enabled for this YAML. It does not include unrelated HF RoPE/Liger edits, private datasets, or other experimental configurations.
+The bundle preserves the reference implementation, including optional loss weighting and benchmark instrumentation, and adds the Qwen3.6 MTP loading guard. Optional features need not be enabled for this YAML. It does not include unrelated HF RoPE/Liger edits, private datasets, or other experimental configurations.
 
 ## Data and schedule
 
@@ -100,7 +101,7 @@ Once all eight GPUs are available, launch from the repository root:
 bash examples/megatron/512k/run.sh /work/venvs/qwen35-512k /work/src/roll-qwen35-512k /work/configs/train-512k.yaml
 ```
 
-The launcher checks source hashes, pinned core versions, all training/model YAML fields, local model/data registration, and that the output directory is new. It sets `USE_MCA=1`, eight processes, the intended source paths, packaged NVIDIA library paths, and `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` as in the reference environment. Then it replaces itself with the foreground training process. The preflight deliberately hides GPUs only in its own child process and never loads model weights; training retains all eight GPUs.
+The launcher checks source hashes, pinned core versions, all training/model YAML fields, local model/data registration, and that the output directory is new. It sets `USE_MCA=1`, eight processes, the intended source paths, packaged NVIDIA library paths, and `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` as in the reference environment. Then it replaces itself with the foreground training CLI, which converts the final native checkpoint after the training workers exit successfully. The preflight deliberately hides GPUs only in its own child process and never loads model weights; training retains all eight GPUs.
 
 In tmux, run in the foreground of the designated pane with stdout/stderr attached. Do not add `tee`, output redirection, or background launchers. Persist output separately with tmux-native pane capture if needed.
 
@@ -108,7 +109,7 @@ The reference job also supplied `PYTHONWARNINGS=ignore::UserWarning` and `TORCH_
 
 ## Verification boundary
 
-The bundle is checked by reconstructing separate clean source checkouts, applying the packaged patch, comparing all six patched files byte-for-byte with the reference implementation, and running CPU tests and a CPU-only import/config preflight. The reference installed environment also passes `pip check`; installed Megatron-Core, Transformer Engine Torch, FLA, and FLA Core Python sources were checked against their distribution RECORD hashes without finding additional local edits.
+The bundle is checked by reconstructing separate clean source checkouts, applying the packaged patch, comparing the original six patched files byte-for-byte with the reference implementation, and running CPU tests and a CPU-only import/config preflight. The reference installed environment also passes `pip check`; installed Megatron-Core, Transformer Engine Torch, FLA, and FLA Core Python sources were checked against their distribution RECORD hashes without finding additional local edits.
 
 The CPU regression tests cover the bundle hashes, label/loss-weight shifting, EP/variable-length padding, and the epoch-padding sampler:
 
@@ -123,7 +124,7 @@ These checks use existing installed dependencies with clean **source** checkouts
 
 `save_strategy: "no"` disables periodic checkpoints. The local workflow still calls final `trainer.save_model()` unless `benchmark_skip_final_save` is enabled; this example leaves its patched default at `false`. `save_only_model: true`, `save_hf_model: false`, and `ckpt_format: torch_dist` select final MCore model output, not HF weights or a full optimizer-resumable checkpoint. Logs and trainer metadata may still be written.
 
-There are no intermediate checkpoints or optimizer state for an exact interrupted-run resume. Verify all final model shards and metadata before conversion. Use a separately validated adapter-compatible MCore-to-HF procedure, checking that Qwen3.5 configuration and YaRN fields survive export. No unverified conversion command is provided here.
+There are no intermediate checkpoints or optimizer state for an exact interrupted-run resume. Verify all final model shards and metadata before conversion. The training CLI now automatically converts the final native checkpoint with the existing `scripts/megatron_merge.py`, using `export_dir` or `output_dir + "-hf"`. It preserves the trained MRoPE/YaRN fields and validates the exported tokenizer, chat template and weight shards. Direct HF saving and skipped final saves do not trigger a second conversion.
 
 ## Sharing safely
 

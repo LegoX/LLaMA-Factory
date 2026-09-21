@@ -662,6 +662,23 @@ For single-node **8×H200** Qwen3.5-35B-A3B-Base full SFT, see the [512K guide](
 
 The guide includes the workflow integration, a fixed-baseline adapter patch with checksums, isolated-environment installation instructions, and a checked launcher; stock packages plus the YAML alone are not sufficient. Optimizer steps have been observed, but this does not certify completion of full training, HF export, or evaluation. Replace placeholder paths and register your dataset. Do not launch on occupied GPUs.
 
+### Training, export, serving and evaluation
+
+This repository handles preprocessing, training and HF export. **The exported HF model directory is the handoff point:** SGLang runs in its own environment; Harbor / OpenHands runs evaluation against its OpenAI-compatible API. Neither serving nor evaluation needs to launch through LLaMA-Factory.
+
+Reuse existing entry points and put experiment settings in YAML instead of copying per-run scripts. Training requires the pinned ROLL adapter and environment in the [512K guide](examples/megatron/README_512k.md). Preprocessing validates token-level loss masks. With `use_mca: true` (or `USE_MCA=1`), successful CLI training automatically converts native checkpoints to `export_dir` or `output_dir + "-hf"`, preserving trained precision, MRoPE/YaRN settings and the chat template. Non-Megatron training, `save_hf_model: true`, and skipped final saves bypass conversion.
+
+| Current deployment | DPSK v4.1 Flash | Qwen3.6-35B-A3B Instruct |
+| --- | --- | --- |
+| Runtime | H200-1, dedicated SGLang dev-cu13-dsv41 rootfs | H800, separate SGLang 0.5.12 environment |
+| GPU layout | TP8 / EP8 | Four TP2 replicas |
+| Context / request limit | 524288 / 64 | Native 262144 / 8 per replica |
+| Reasoning / tool parser | `deepseek-v41` / `deepseekv41` | `qwen3` / `qwen3_coder` |
+
+DPSK uses host Engram and Supervisor; its current command does not enable W4A8, bounded replay or speculative decoding. Qwen uses the model's chat template. OH1.33 must allowlist the served model for reasoning replay, use `reasoning_replay_format="top_level"`, and pass `preserve_thinking=true` and `enable_thinking=true` as chat-template arguments. Token counting must use the same arguments and avoid duplicate thinking blocks. This was validated with Qwen3.6; verify Qwen3.5 template support separately.
+
+Assign distinct physical CPU core groups to the four TP2 replicas within the Slurm allocation. Serving and eval entry points live in Harbor. See the Qwen / DPSK section in [README_zh.md](README_zh.md) for current paths and settings. Report throughput together with context length and actual generation concurrency.
+
 ### Fine-Tuning with LLaMA Board GUI (powered by [Gradio](https://github.com/gradio-app/gradio))
 
 ```bash
