@@ -103,3 +103,14 @@ Multi-GPU automatically uses `torchrun`. Additional backends:
 - Python 3.11+ syntax
 - Double quotes for strings
 - All new files must include Apache 2.0 license header (checked by `make license`)
+
+## Lego-X fork (branch `conghao/feature`)
+
+This fork adds Megatron-Core long-context SFT on top of upstream; the upstream sections above still apply. `AGENTS.md` and `CLAUDE.md` both point at this file.
+
+- **`src/mcore_adapter/`** is vendored from `alibaba/ROLL@192b1a01` (Apache-2.0) and shipped in the wheel together with `src/llamafactory`. Local changes are separate commits on top of the pristine import: 512K YaRN/mRoPE, precision-aware optimizer, chunked cross-entropy, MTP loading guard, flat THD packing with context parallelism, `EpochShuffledSampler` (`MCA_EPOCH_SHUFFLE_SEED`), and the `cp_size` loss scaling (without it gradients were `1/cp_size` under context parallelism). Do not `pip install mcore-adapter`: the PyPI package of that name is unrelated.
+- **`examples/megatron/512k/`** is the only launch path: `run.sh <env-prefix> <yaml>` (runs `preflight.py`, then `USE_MCA=1 llamafactory-cli train`), `install.sh <new-conda-prefix>` builds the env from `constraints.txt` with the cuDNN 9.26 override, `activate_shared.sh` for interactive use. Read `examples/megatron/README_512k.md` before changing anything here.
+- **Configs**: the repository keeps sanitized examples only (`qwen3_5_35b_a3b_base_512k_yarn.yaml`, `qwen3_6_27b_256k_4node.yaml`). Per-run YAMLs live with their outputs in `saves/<run>/` (a gitignored symlink into `../artifacts/LLaMA-Factory/saves`). `preflight.py` refuses an existing `output_dir`.
+- **Multi-node**: the launcher reads `MASTER_ADDR`/`MASTER_PORT`/`NODE_RANK` from the environment and needs `NNODES`, `NPROC_PER_NODE`. With `MCA_EPOCH_SHUFFLE_SEED` the sampler multiple is `per_device_bs × grad_accum × DP`.
+- **Numerics**: cuDNN 9.10 fused attention is wrong for THD layout at head_dim 256, so the env pins cuDNN 9.26. Reusing a tokenized cache requires the same `template` and `LF_PACK_SUBSEQ_ALIGN` it was built with.
+- Tests for the bundle: `tests/train/test_mca_512k_bundle.py`.
