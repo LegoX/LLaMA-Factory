@@ -175,13 +175,13 @@ om_cache/
 llamaboard_cache/
 llamaboard_config/
 saves
-data_jsonl/
+data_jsonl
 output/
 outputs/
-wandb/
+wandb
 swanlog/
 generated_predictions.jsonl
 predictions_score.json
 /data/
 /*.txt
-logs/
+logs
