@@ -1,9 +1,6 @@
 import ast
 import functools
-import hashlib
-import json
 import math
-import os
 import unittest
 from collections.abc import Sequence
 from copy import deepcopy
@@ -12,7 +9,7 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[2]
-BUNDLE = ROOT / "examples/megatron/512k"
+TRAINER = ROOT / "src/mcore_adapter/trainer/trainer.py"
 
 
 def load_definition(path, name, namespace):
@@ -23,16 +20,11 @@ def load_definition(path, name, namespace):
 
 
 class BundleTests(unittest.TestCase):
-    def test_checksums_and_scope(self):
-        manifest = json.loads((BUNDLE / "manifest.json").read_text())
-        assert len(manifest["files"]) == 7
-        assert "mcore_adapter/src/mcore_adapter/models/converter/model_converter.py" in manifest["files"]
-        assert hashlib.sha256((BUNDLE / "mcore-adapter.patch").read_bytes()).hexdigest() == manifest["patch_sha256"]
-        for name, expected in manifest["llamafactory_files"].items():
-            assert hashlib.sha256((ROOT / name).read_bytes()).hexdigest() == expected
-        for name in manifest["files"]:
-            assert name.startswith("mcore_adapter/src/mcore_adapter/")
-            assert ".." not in Path(name).parts
+    def test_vendored_adapter_is_in_tree(self):
+        assert TRAINER.is_file()
+        assert (ROOT / "src/mcore_adapter/__init__.py").is_file()
+        for name in ["mcore-adapter.patch", "manifest.json", "prepare_adapter.py"]:
+            assert not (ROOT / "examples/megatron/512k" / name).exists(), f"stale bundle file {name}"
 
     def test_loss_weights_align_with_shifted_labels(self):
         namespace = {"functools": functools, "Sequence": Sequence, "Any": Any, "deepcopy": deepcopy}
@@ -74,15 +66,10 @@ class BundleTests(unittest.TestCase):
             assert eval(compile(ast.Expression(expression), "padding", "eval"), {"training_args": args}) == expected
 
     def test_sampler_epochs_cover_all_samples_and_rotate_padding(self):
-        adapter = os.environ.get("MCA_512K_ADAPTER")
-        if not adapter:
-            self.skipTest("Set MCA_512K_ADAPTER to the patched checkout to test its sampler")
         from torch.utils.data import Dataset, SequentialSampler
 
         sampler_type = load_definition(
-            Path(adapter) / "mcore_adapter/src/mcore_adapter/trainer/trainer.py",
-            "PaddedSequentialSampler",
-            {"SequentialSampler": SequentialSampler, "Dataset": Dataset, "math": math},
+            TRAINER, "PaddedSequentialSampler", {"SequentialSampler": SequentialSampler, "Dataset": Dataset, "math": math}
         )
         sampler = sampler_type(list(range(2481)), 64)
         assert len(sampler) == 2496
@@ -96,6 +83,26 @@ class BundleTests(unittest.TestCase):
         assert list(sampler_type([0, 1], 2)) == [0, 1]
         with self.assertRaises(ValueError):
             sampler_type([0], 0)
+
+    def test_epoch_shuffled_sampler_drops_partial_global_steps(self):
+        import torch
+        from torch.utils.data import Dataset
+
+        sampler_type = load_definition(TRAINER, "EpochShuffledSampler", {"torch": torch, "Dataset": Dataset})
+        # 708 packed rows, micro batch 1 x grad accumulation 24 x data parallel 4 = 96 samples per optimizer step
+        sampler = sampler_type(list(range(708)), 96, 1105)
+        assert len(sampler) == 672
+        sampler.set_epoch(0)
+        first = list(sampler)
+        sampler.set_epoch(1)
+        second = list(sampler)
+        assert len(first) == len(second) == 672
+        assert len(set(first)) == 672 and set(first) <= set(range(708))
+        assert first != second
+        sampler.set_epoch(0)
+        assert list(sampler) == first
+        with self.assertRaises(ValueError):
+            sampler_type([0], 0, 1105)
 
 
 if __name__ == "__main__":

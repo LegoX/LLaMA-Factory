@@ -12,28 +12,32 @@ Optimizer steps have been observed. This guide does **not** certify completion o
 | --- | --- |
 | Hardware | One node, 8×H200, approximately 141 GiB device memory per GPU |
 | LLaMA-Factory | `0.9.5.dev0`, baseline `ecbc2bb3`, plus local changes below |
-| mcore_adapter | `0.10.0.dev0`, adapter baseline `192b1a0`, plus local changes below |
+| mcore_adapter | `0.10.0.dev0`, vendored in-tree at `src/mcore_adapter` from ROLL commit `192b1a01`, plus local changes below |
 | Megatron-Core | `0.18.2` |
 | PyTorch | `2.10.0+cu128` |
 | Transformers | `5.6.0` |
 | Transformer Engine | `2.18.0` |
+| cuDNN | `9.26.0.51`, installed over the `9.10.2.21` the torch wheel pins; 9.10 fused attention is wrong in THD (packed) layout for head_dim 256 |
 
 The bundled [constraints](512k/constraints.txt) pin the observed installed Python package versions; local editable packages and private data-processing tools are excluded. The adapter source is pinned separately below. This does not lock OS packages, drivers, or compiler build dependencies. Use Linux x86-64, Python 3.12, a CUDA 12.8 toolkit (observed nvcc 12.8.93), and a CUDA-12.8-compatible NVIDIA driver. Host RAM must accommodate optimizer offload and saving; a minimum has not been established here. Do not assume this fits smaller GPUs.
 
 ## Local extension checklist
 
-The LLaMA-Factory `workflow.py` integration is included in this branch. The seven-file adapter implementation is included as [mcore-adapter.patch](512k/mcore-adapter.patch), against official ROLL commit `192b1a01ea61c113b2deb543f7b115783038dff8`. The [manifest](512k/manifest.json) records before/after file checksums and the LLaMA-Factory integration checksum. Applying this bundle reconstructs the adapter source used by the reference job; access to its original machine is not required. Do not patch a checkout or environment being used by a running job.
+The LLaMA-Factory `workflow.py` integration is included in this branch. The adapter is vendored in-tree at `src/mcore_adapter` (Apache-2.0, from `alibaba/ROLL` commit `192b1a01ea61c113b2deb543f7b115783038dff8`); the commit history of that directory records the pristine upstream import followed by the local changes below, so no separate patch bundle or checkout is needed.
 
 | Location | Relevant local changes |
 | --- | --- |
 | LLaMA-Factory: `src/llamafactory/train/mca/workflow.py` | Avoid cutoff-length padding with EP and variable sequence lengths; align optional loss weights; consult the adapter final-save benchmark flag. |
-| Adapter: `mcore_adapter/src/mcore_adapter/training_args.py` | Precision-aware optimizer, cache release, epoch-padding and benchmark flags; explicit FP32 accumulation control. |
-| Adapter: `mcore_adapter/src/mcore_adapter/trainer/trainer.py` | Forward optimizer settings; release unused CUDA cache before final gradient synchronization; pad epochs to full steps; terminate/recreate epoch iterators; optional loss weights. |
-| Adapter: `mcore_adapter/src/mcore_adapter/models/qwen3_5/config_qwen3_5.py` | Define the mRoPE/YaRN fields used by the YAML. |
-| Adapter: `mcore_adapter/src/mcore_adapter/models/qwen3_5/modeling_qwen3_5.py` | Wire YaRN into rotary embeddings and the local long-sequence output path. |
-| Adapter: `mcore_adapter/src/mcore_adapter/models/qwen3_vl/rope_utils.py` | Local YaRN frequency interpolation and rotary scaling. |
-| Adapter: `mcore_adapter/src/mcore_adapter/models/model_factory.py` | TP-aware fused cross entropy and checkpointed chunked vocabulary-parallel output processing to limit peak logits memory. |
-| Adapter: `mcore_adapter/src/mcore_adapter/models/converter/model_converter.py` | Ignore auxiliary MTP weights when MTP training is disabled. |
+| Adapter: `src/mcore_adapter/training_args.py` | Precision-aware optimizer, cache release, epoch-padding and benchmark flags; explicit FP32 accumulation control. |
+| Adapter: `src/mcore_adapter/trainer/trainer.py` | Forward optimizer settings; release unused CUDA cache before final gradient synchronization; pad epochs to full steps; terminate/recreate epoch iterators; optional loss weights. |
+| Adapter: `src/mcore_adapter/models/qwen3_5/config_qwen3_5.py` | Define the mRoPE/YaRN fields used by the YAML. |
+| Adapter: `src/mcore_adapter/models/qwen3_5/modeling_qwen3_5.py` | Wire YaRN into rotary embeddings and the local long-sequence output path. |
+| Adapter: `src/mcore_adapter/models/qwen3_vl/rope_utils.py` | Local YaRN frequency interpolation and rotary scaling. |
+| Adapter: `src/mcore_adapter/models/model_factory.py` | TP-aware fused cross entropy and checkpointed chunked vocabulary-parallel output processing to limit peak logits memory. |
+| Adapter: `src/mcore_adapter/models/converter/model_converter.py` | Ignore auxiliary MTP weights when MTP training is disabled. |
+| Adapter: `src/mcore_adapter/models/sequence_packing_mixin.py`, `trainer.py`, `models/qwen3_5/modeling_qwen3_5.py` | Flat THD layout for `neat_packing` with context parallelism, `LF_PACK_SUBSEQ_ALIGN` boundary alignment, mRoPE position alignment for packed rows. |
+| Adapter: `src/mcore_adapter/trainer/trainer.py` | `EpochShuffledSampler`: seeded per-epoch permutation with exact global-step drop_last across data-parallel ranks, enabled by `MCA_EPOCH_SHUFFLE_SEED`. |
+| Adapter: `src/mcore_adapter/trainer/trainer.py` | Scale the per-token loss by `cp_size` under context parallelism: every CP rank reports the CP-summed token count and Megatron divides gradients by the DP×CP-reduced count, so without the factor gradients were `1/cp_size` of the correct value (reported `grad_norm` halved at CP2). |
 
 The bundle preserves the reference implementation, including optional loss weighting and benchmark instrumentation, and adds the Qwen3.6 MTP loading guard. Optional features need not be enabled for this YAML. It does not include unrelated HF RoPE/Liger edits, private datasets, or other experimental configurations.
 
@@ -60,24 +64,18 @@ The YAML retains `max_steps: 117` and `lr_scheduler_kwargs.lr_decay_steps: 117`.
 
 ## Install into a separate environment
 
-Use a fresh checkout of the private `LegoX/LLaMA-Factory` repository on `conghao/feature` containing this bundle, not an upstream public checkout. Install system prerequisites first: Python 3.12 with venv support, Git, a C++ compiler/build tools, and CUDA 12.8 with `nvcc`. Network access to GitHub, PyPI, and the PyTorch wheel index is required. CUDA extensions may compile from source; allow disk space and time for compilation.
+Use a fresh checkout of the private `LegoX/LLaMA-Factory` repository on `conghao/feature`, not an upstream public checkout. Install system prerequisites first: conda, Git, a C++ compiler/build tools, and CUDA 12.8 with `nvcc`. Network access to GitHub, PyPI, and the PyTorch wheel index is required. CUDA extensions may compile from source; allow disk space and time for compilation.
 
 From this repository root:
 
 ```bash
 export CUDA_HOME=/path/to/cuda-12.8
-bash examples/megatron/512k/install.sh /work/venvs/qwen35-512k /work/src/roll-qwen35-512k
+bash examples/megatron/512k/install.sh /work/envs/lf
 ```
 
-Both target paths must be absolute and must not already exist. The script creates an isolated venv, installs the pinned PyTorch CUDA 12.8 build and runtime dependencies, checks out the fixed official ROLL commit, applies and verifies the included patch, installs both projects, and runs `pip check`. It does not start training. It deliberately refuses to update an existing environment. If installation fails, inspect the error rather than rerunning against an active environment. The old generic Megatron Dockerfile targets different versions and is not this recipe.
+The target path must be absolute and must not already exist. The script creates a conda env, installs the pinned PyTorch CUDA 12.8 build and runtime dependencies, installs this repository (which ships `mcore_adapter`) in editable mode, overrides cuDNN to 9.26.0.51, and runs `pip check` (the only expected complaint is the cuDNN pin of the torch wheel). It does not start training. It deliberately refuses to update an existing environment. If installation fails, inspect the error rather than rerunning against an active environment. The old generic Megatron Dockerfile targets different versions and is not this recipe.
 
-For an already prepared **separate** environment and clean adapter checkout, the patch tool can also be used directly:
-
-```bash
-python examples/megatron/512k/prepare_adapter.py /work/src/roll-qwen35-512k --apply
-```
-
-Without `--apply` it is read-only verification. It refuses a different baseline, partial patches, unrelated tracked edits, or checksum mismatches. Reapplying the exact bundle is a verified no-op.
+On the shared cluster the prepared env is `miniconda/envs/lf`; `source examples/megatron/512k/activate_shared.sh` exports the same variables `run.sh` sets.
 
 ## Prepare data and launch
 
@@ -98,10 +96,12 @@ This is a schema example, not the private reference dataset. Use the actual matc
 Once all eight GPUs are available, launch from the repository root:
 
 ```bash
-bash examples/megatron/512k/run.sh /work/venvs/qwen35-512k /work/src/roll-qwen35-512k /work/configs/train-512k.yaml
+bash examples/megatron/512k/run.sh /work/envs/lf /work/configs/train-512k.yaml
 ```
 
-The launcher checks source hashes, pinned core versions, all training/model YAML fields, local model/data registration, and that the output directory is new. It sets `USE_MCA=1`, eight processes, the intended source paths, packaged NVIDIA library paths, and `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` as in the reference environment. Then it replaces itself with the foreground training CLI, which converts the final native checkpoint after the training workers exit successfully. The preflight deliberately hides GPUs only in its own child process and never loads model weights; training retains all eight GPUs.
+Multi-node: export `NNODES`, `NODE_RANK`, `MASTER_ADDR`, `MASTER_PORT` (and the NCCL interface variables for the fabric) on every node and run the same command on each; the launcher passes them to torchrun.
+
+The launcher checks pinned core versions, in-tree source identity, all training/model YAML fields, local model/data registration, and that the output directory is new. It sets `USE_MCA=1`, eight processes, the intended source paths, packaged NVIDIA library paths, and `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` as in the reference environment. Then it replaces itself with the foreground training CLI, which converts the final native checkpoint after the training workers exit successfully. The preflight deliberately hides GPUs only in its own child process and never loads model weights; training retains all eight GPUs.
 
 In tmux, run in the foreground of the designated pane with stdout/stderr attached. Do not add `tee`, output redirection, or background launchers. Persist output separately with tmux-native pane capture if needed.
 
@@ -114,8 +114,7 @@ The bundle is checked by reconstructing separate clean source checkouts, applyin
 The CPU regression tests cover the bundle hashes, label/loss-weight shifting, EP/variable-length padding, and the epoch-padding sampler:
 
 ```bash
-CUDA_VISIBLE_DEVICES='' MCA_512K_ADAPTER=/work/src/roll-qwen35-512k \
-  /work/venvs/qwen35-512k/bin/python -B -m unittest discover -s tests/train -p test_mca_512k_bundle.py -v
+CUDA_VISIBLE_DEVICES='' /work/envs/lf/bin/python -B -m unittest discover -s tests/train -p test_mca_512k_bundle.py -v
 ```
 
 These checks use existing installed dependencies with clean **source** checkouts. A fresh package installation/build and an isolated eight-GPU optimizer step have not been executed as part of packaging, because the training environment and GPUs must remain untouched. The files needed to reconstruct the implementation are now included; this is not a claim that a fresh-machine GPU acceptance test or the complete training/export/evaluation chain has passed.
