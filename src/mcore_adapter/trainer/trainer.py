@@ -114,6 +114,35 @@ class PaddedSequentialSampler(SequentialSampler):
         self.epoch = epoch
 
 
+class EpochShuffledSampler(torch.utils.data.Sampler):
+    """Seeded per-epoch permutation (ms-swift/Megatron-style shuffle) with global-batch drop_last.
+
+    Enabled by MCA_EPOCH_SHUFFLE_SEED; epoch e uses seed + e. Tail samples that do not fill a whole
+    optimizer step across all data-parallel ranks (multiple = micro batch * grad accumulation * dp size)
+    are dropped each epoch.
+    """
+
+    def __init__(self, data_source: Dataset, multiple: int, seed: int):
+        super().__init__()
+        if multiple <= 0:
+            raise ValueError(f"multiple must be positive, got {multiple}")
+        self.num_samples = len(data_source)
+        self.multiple = multiple
+        self.seed = seed
+        self.epoch = 0
+
+    def __len__(self):
+        return (self.num_samples // self.multiple) * self.multiple
+
+    def __iter__(self):
+        generator = torch.Generator()
+        generator.manual_seed(self.seed + self.epoch)
+        return iter(torch.randperm(self.num_samples, generator=generator)[: len(self)].tolist())
+
+    def set_epoch(self, epoch: int):
+        self.epoch = epoch
+
+
 class McaTrainer(Trainer):
     metrics_keys = ["loss"]
     _language_input_names = ["input_ids", "attention_mask", "labels", "position_ids"]
@@ -226,7 +255,16 @@ class McaTrainer(Trainer):
         if not isinstance(train_dataset, torch.utils.data.IterableDataset):
             if not self.args.dataloader_drop_last:
                 logger.warning("Currently, train dataloader drop_last must be set to True!")
-            if self.args.pad_train_samples_to_full_steps:
+            if os.environ.get("MCA_EPOCH_SHUFFLE_SEED") is not None:
+                samples_per_step = (
+                    self.args.per_device_train_batch_size
+                    * self.args.gradient_accumulation_steps
+                    * mpu.get_data_parallel_world_size(with_context_parallel=False)
+                )
+                dataloader_params["sampler"] = EpochShuffledSampler(
+                    train_dataset, samples_per_step, int(os.environ["MCA_EPOCH_SHUFFLE_SEED"])
+                )
+            elif self.args.pad_train_samples_to_full_steps:
                 samples_per_step = self.args.per_device_train_batch_size * self.args.gradient_accumulation_steps
                 dataloader_params["sampler"] = PaddedSequentialSampler(train_dataset, samples_per_step)
             else:
