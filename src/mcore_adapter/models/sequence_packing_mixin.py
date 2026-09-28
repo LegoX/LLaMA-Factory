@@ -383,9 +383,15 @@ class MultimodalEmbeddingMixin:
             device=data.device,
         )
 
-        for i in range(batch_size):
-            sample_mask = attention_mask[i].bool()
-            valid_tokens = data[i][sample_mask]
+        num_seqs = len(cu_seqlens_padded_cpu) - 1
+        # flat layout: one row holding all (already aligned) sub-sequences back to back
+        flat_layout = batch_size == 1 and num_seqs > 1
+        for i in range(num_seqs if flat_layout else batch_size):
+            if flat_layout:
+                valid_tokens = data[0][cu_seqlens_padded_cpu[i] : cu_seqlens_padded_cpu[i + 1]]
+            else:
+                sample_mask = attention_mask[i].bool()
+                valid_tokens = data[i][sample_mask]
 
             padded_len_i = cu_seqlens_padded_cpu[i + 1] - cu_seqlens_padded_cpu[i]
             start_offset = cu_seqlens_padded_cpu[i] // cp_size

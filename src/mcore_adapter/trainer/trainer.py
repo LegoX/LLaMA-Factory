@@ -343,6 +343,21 @@ class McaTrainer(Trainer):
         attention_mask = inputs.pop("attention_mask", None)
         if attention_mask is None:
             attention_mask = torch.ones_like(inputs["input_ids"])
+        if torch.is_floating_point(attention_mask):
+            # neat-packing segment ids can be promoted to float by collation; they must be non-negative integers
+            if attention_mask.dim() != 2 or bool((attention_mask < 0).any()) or not bool(torch.all(attention_mask == attention_mask.round())):
+                raise ValueError(f"sequence_packing expects 2D integer segment-id attention_mask, got {attention_mask.dtype} {tuple(attention_mask.shape)}")
+            attention_mask = attention_mask.long()
+        if getattr(self.model.config, "position_embedding_type", None) == "mrope" and attention_mask.size(0) == 1:
+            # LF records the trailing pad as its own packed segment; drop trailing segments without any label
+            attention_mask = attention_mask[:, : inputs["input_ids"].size(1)].clone()  # collator may right-pad the mask further
+            seg_ids, labels_row = attention_mask[0], inputs["labels"][0]
+            last_seg = int(seg_ids.max().item())
+            while last_seg > 0 and bool((labels_row[seg_ids == last_seg] == IGNORE_INDEX).all()):
+                seg_ids[seg_ids == last_seg] = 0
+                last_seg -= 1
+            # get_seqlens_in_batch counts trailing zeros as one more sequence; cut them off
+            attention_mask = attention_mask[:, : int((seg_ids > 0).sum().item())]
         seqlens, max_seq_len = get_seqlens_in_batch(attention_mask)
 
         cp_size = mpu.get_context_parallel_world_size()
@@ -352,6 +367,22 @@ class McaTrainer(Trainer):
                 f"neat_packing + cp requires packing data's each sub-sequence is 2 * cp_size aligned, please padding each sub-sequence to {2 * cp_size}(2 * cp_size)."
             )
 
+        if getattr(self.model.config, "position_embedding_type", None) == "mrope":
+            # flat neat-packed row (Qwen3.5 mixin): drop trailing pad so the mixin sees a flat layout,
+            # and restart mrope positions at 0 for every sub-sequence
+            assert attention_mask.size(0) == 1, "mrope sequence packing expects per_device_train_batch_size=1"
+            row_len = inputs["input_ids"].size(1)
+            total_len = int(seqlens[-1].item())
+            for k, v in list(inputs.items()):
+                if isinstance(v, Tensor) and v.dim() >= 2 and v.size(0) == 1 and v.size(1) == row_len:
+                    inputs[k] = v[:, :total_len]
+            seq_starts = seqlens[:-1].to(torch.long)
+            seq_lens = (seqlens[1:] - seqlens[:-1]).to(torch.long)
+            mrope_position_ids = (
+                (torch.arange(total_len, device=seqlens.device) - torch.repeat_interleave(seq_starts, seq_lens))
+                .view(1, 1, -1).expand(3, 1, -1).contiguous()
+            )
+            inputs.pop("position_ids", None)  # [3, b, s] must not go through the flatten below
         packing_inputs = {
             k: v.view(1, -1, *v.shape[2:]) if v is not None and isinstance(v, Tensor) else v
             for k, v in inputs.items()
@@ -372,6 +403,8 @@ class McaTrainer(Trainer):
                 "attention_mask": None,
             }
         )
+        if getattr(self.model.config, "position_embedding_type", None) == "mrope":
+            inputs["position_ids"] = mrope_position_ids
         return inputs
 
     def _get_step_iterator_and_seq_length(

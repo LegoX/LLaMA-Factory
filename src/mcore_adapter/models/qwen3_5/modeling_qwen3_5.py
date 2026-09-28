@@ -242,10 +242,12 @@ class Qwen3_5Model(Qwen3_5McaGPTModel, MultimodalEmbeddingMixin):
         return encoder_small_batch_size_gather(output_features)
 
     def get_batch_on_this_cp_rank(self, batch, dim3_keys: list[str] = ["attention_mask"]):
-        # VLM forward() handles input_ids and attention_mask splitting internally
+        # VLM forward() handles input_ids, attention_mask, and position_ids splitting internally.
+        # Keeping full position_ids here avoids a second CP split in MRoPE generation.
         skipped = {}
-        for key in ("input_ids", "attention_mask"):
-            if key in batch:
+        cp_keys = {"labels", "loss_weights", "packed_seq_params"}  # packed_seq_params selects the THD split
+        for key in tuple(batch):
+            if key not in cp_keys:
                 skipped[key] = batch.pop(key)
         batch = super().get_batch_on_this_cp_rank(batch, dim3_keys=dim3_keys)
         batch.update(skipped)
