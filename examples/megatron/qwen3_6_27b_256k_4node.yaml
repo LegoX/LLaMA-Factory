@@ -1,0 +1,75 @@
+# Qwen3.6/3.8-27B full SFT at 256K on 4 nodes x 8 GPUs (TP4 x CP2 per node, DP4), Megatron-Core via mcore_adapter.
+# Sanitized from the 2026-09-28 run: replace the paths, register the dataset in dataset_dir/dataset_info.json.
+# Launch on every node with NNODES=4 NODE_RANK=<0..3> MASTER_ADDR/MASTER_PORT set:
+#   LF_PACK_SUBSEQ_ALIGN=4 MCA_EPOCH_SHUFFLE_SEED=1105 bash examples/megatron/512k/run.sh /path/to/env this.yaml
+# Effective batch = 1 x 24 x 4 = 96 rows. Peak memory ~73 GiB per GPU with full recompute and no optimizer offload.
+
+model_name_or_path: /path/to/Qwen3.6-27B
+trust_remote_code: true
+stage: sft
+do_train: true
+do_eval: false
+finetuning_type: full
+
+dataset_dir: /path/to/data_jsonl/long_context_sft
+dataset: long_context_sft
+template: qwen3_6
+cutoff_len: 262144
+packing: true
+neat_packing: true
+overwrite_cache: false
+preprocessing_num_workers: 1
+dataloader_num_workers: 0
+pad_train_samples_to_full_steps: false
+
+output_dir: /path/to/saves/qwen3_6_27b_256k_4node
+logging_steps: 1
+save_strategy: steps
+save_steps: 7
+plot_loss: true
+save_only_model: true
+save_hf_model: false
+report_to: none
+run_name: qwen3_6_27b_256k_4node
+
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 24
+learning_rate: 4.0e-05
+adam_beta1: 0.9
+adam_beta2: 0.98
+weight_decay: 0.04
+max_grad_norm: 1.0
+max_steps: 56
+lr_scheduler_type: cosine
+warmup_steps: 5
+lr_scheduler_kwargs:
+  lr_decay_steps: 56
+  min_lr: 4.0e-06
+bf16: true
+accumulate_allreduce_grads_in_fp32: true
+calculate_per_token_loss: true
+ddp_timeout: 180000000
+resume_from_checkpoint: null
+seed: 1105
+data_seed: 1105
+mtp_num_layers: 0
+
+tensor_model_parallel_size: 4
+pipeline_model_parallel_size: 1
+context_parallel_size: 2
+sequence_parallel: true
+variable_seq_lengths: true
+transformer_impl: transformer_engine
+cross_entropy_loss_fusion: true
+recompute_granularity: full
+use_distributed_optimizer: true
+use_precision_aware_optimizer: true
+optimizer_cpu_offload: false
+overlap_param_gather: false
+overlap_grad_reduce: false
+empty_cache_before_grad_sync: true
+ckpt_format: torch_dist
+moe_token_dispatcher_type: alltoall
+additional_configs:
+  max_sequence_length: 262144
+  position_embedding_type: mrope
