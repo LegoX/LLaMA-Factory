@@ -369,6 +369,12 @@ class McaTrainer(Trainer):
             metrics = {"loss": (loss.clone().detach(), local_num_tokens)}
         else:
             metrics = {"loss": (loss / local_num_tokens).clone().detach()}
+        if cp_size > 1:
+            # Every CP rank reports the CP-summed token count, and Megatron's finalize_model_grads
+            # all-reduces num_tokens over the DP x CP group, so the divisor is cp_size times too
+            # large; scale the loss used for backward by cp_size to compensate (as Megatron's
+            # pretrain_gpt does). The metrics above stay unscaled.
+            loss = loss * cp_size
         return loss, local_num_tokens.int(), metrics
 
     def _inner_forward_step(self, data_iterator: Iterator, model: DistributedDataParallel):
