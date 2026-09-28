@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from collections import defaultdict
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any, Optional
@@ -191,6 +192,14 @@ class PackedSupervisedDatasetProcessor(SupervisedDatasetProcessor):
                 videos=examples["_videos"][i] or [],
                 audios=examples["_audios"][i] or [],
             )
+            # Optional: pad each packed sub-sequence to a multiple of LF_PACK_SUBSEQ_ALIGN (e.g. 2 * CP size),
+            # required by Megatron THD packing with context parallelism. Padding tokens are ignored by the loss.
+            pack_align = int(os.environ.get("LF_PACK_SUBSEQ_ALIGN", "0"))
+            if self.data_args.neat_packing and pack_align > 1 and len(input_ids) % pack_align:
+                pad = pack_align - len(input_ids) % pack_align
+                input_ids = input_ids + [self.tokenizer.pad_token_id] * pad
+                labels = labels + [IGNORE_INDEX] * pad
+                loss_weights = loss_weights + [0.0] * pad
             length = len(input_ids)
             if length > self.data_args.cutoff_len:
                 logger.warning_rank0(f"Dropped lengthy example with length {length} > {self.data_args.cutoff_len}.")
