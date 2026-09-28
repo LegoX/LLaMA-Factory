@@ -83,6 +83,37 @@ if is_peft_available():
 logger = get_logger(__name__)
 
 
+class PaddedSequentialSampler(SequentialSampler):
+    """Sequentially cover the dataset, then rotate padding across epochs to fill optimizer steps."""
+
+    def __init__(self, data_source: Dataset, multiple: int):
+        super().__init__(data_source)
+        if multiple <= 0:
+            raise ValueError(f"multiple must be positive, got {multiple}")
+        self.multiple = multiple
+        self.epoch = 0
+
+    def __iter__(self):
+        dataset_size = len(self.data_source)
+        if dataset_size == 0:
+            return iter(())
+        padded_size = len(self)
+        padding_size = padded_size - dataset_size
+        padding_start = (self.epoch * padding_size) % dataset_size
+        indices = list(range(dataset_size))
+        indices.extend((padding_start + offset) % dataset_size for offset in range(padding_size))
+        return iter(indices)
+
+    def __len__(self):
+        dataset_size = len(self.data_source)
+        if dataset_size == 0:
+            return 0
+        return math.ceil(dataset_size / self.multiple) * self.multiple
+
+    def set_epoch(self, epoch: int):
+        self.epoch = epoch
+
+
 class McaTrainer(Trainer):
     metrics_keys = ["loss"]
     _language_input_names = ["input_ids", "attention_mask", "labels", "position_ids"]
@@ -195,7 +226,11 @@ class McaTrainer(Trainer):
         if not isinstance(train_dataset, torch.utils.data.IterableDataset):
             if not self.args.dataloader_drop_last:
                 logger.warning("Currently, train dataloader drop_last must be set to True!")
-            dataloader_params["sampler"] = SequentialSampler(train_dataset)
+            if self.args.pad_train_samples_to_full_steps:
+                samples_per_step = self.args.per_device_train_batch_size * self.args.gradient_accumulation_steps
+                dataloader_params["sampler"] = PaddedSequentialSampler(train_dataset, samples_per_step)
+            else:
+                dataloader_params["sampler"] = SequentialSampler(train_dataset)
             dataloader_params["drop_last"] = True
             dataloader_params["worker_init_fn"] = lambda _: set_seed(torch.initial_seed() % 2**32)
             dataloader_params["prefetch_factor"] = self.args.dataloader_prefetch_factor
@@ -268,7 +303,9 @@ class McaTrainer(Trainer):
 
     def _pre_compute_loss(self, data_iterator: Iterator, model: DistributedDataParallel):
         inputs = self._prepare_train_inputs(data_iterator)
-        loss_mask = (inputs["labels"] != IGNORE_INDEX).float()
+        label_mask = (inputs["labels"] != IGNORE_INDEX).float()
+        loss_weights = inputs.pop("loss_weights", None)
+        loss_mask = label_mask if loss_weights is None else loss_weights.float() * label_mask
         if "loss_mask" not in inputs:
             inputs["loss_mask"] = loss_mask
         output_tensor = model(**inputs)
@@ -511,6 +548,7 @@ class McaTrainer(Trainer):
             bf16=self.args.bf16,
             params_dtype=params_dtype,
             use_distributed_optimizer=self.args.use_distributed_optimizer,
+            use_precision_aware_optimizer=self.args.use_precision_aware_optimizer,
             clip_grad=self.args.max_grad_norm,
             optimizer_cpu_offload=self.args.optimizer_cpu_offload,
             optimizer_offload_fraction=self.args.optimizer_offload_fraction,
@@ -787,7 +825,15 @@ class McaTrainer(Trainer):
                 model_config.grad_sync_func = [model_wrapped.start_grad_sync for model_wrapped in self.models_wrapped]
                 if len(self.models_wrapped) == 1:
                     model_config.grad_sync_func = model_config.grad_sync_func[0]
-        model_config.finalize_model_grads_func = finalize_model_grads
+        if self.args.empty_cache_before_grad_sync:
+
+            def finalize_model_grads_with_cache_release(*args, **kwargs):
+                torch.cuda.empty_cache()
+                return finalize_model_grads(*args, **kwargs)
+
+            model_config.finalize_model_grads_func = finalize_model_grads_with_cache_release
+        else:
+            model_config.finalize_model_grads_func = finalize_model_grads
         return (
             epochs_trained,
             num_train_epochs,
@@ -800,10 +846,8 @@ class McaTrainer(Trainer):
         )
 
     def _get_train_cyclic_iterator(self, train_dataloader):
-        while True:
-            for x in train_dataloader:
-                yield x
-            self.control.should_epoch_stop = True
+        for x in train_dataloader:
+            yield x
 
     def _inner_training_loop(
         self, batch_size=None, args=None, resume_from_checkpoint=None, trial=None, ignore_keys_for_eval=None
@@ -861,6 +905,8 @@ class McaTrainer(Trainer):
                 if step_iterator is None:
                     break
                 step += 1
+                if args.benchmark_log_peak_memory and torch.cuda.is_available():
+                    torch.cuda.reset_peak_memory_stats()
                 if rng_to_sync:
                     self._load_rng_state(resume_from_checkpoint)
                     rng_to_sync = False
@@ -895,6 +941,20 @@ class McaTrainer(Trainer):
                     "num_zeros_in_grad": num_zeros_in_grad or 0,
                     "token_per_sec_per_gpu": token_per_sec_per_gpu,
                 }
+                if args.benchmark_log_peak_memory and torch.cuda.is_available():
+                    peak_memory = torch.tensor(
+                        [torch.cuda.max_memory_allocated(), torch.cuda.max_memory_reserved()],
+                        dtype=torch.float64,
+                        device=args.device,
+                    )
+                    if dist.is_initialized():
+                        dist.all_reduce(peak_memory, op=dist.ReduceOp.MAX)
+                    logs.update(
+                        {
+                            "peak_cuda_allocated_gib": peak_memory[0].item() / (1024**3),
+                            "peak_cuda_reserved_gib": peak_memory[1].item() / (1024**3),
+                        }
+                    )
                 self._maybe_log_save_evaluate(
                     tr_loss,
                     grad_norm,

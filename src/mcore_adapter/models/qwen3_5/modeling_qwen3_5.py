@@ -34,6 +34,19 @@ class Qwen3_5McaGPTModel(McaGPTModel):
             rotary_interleaved=self.config.rotary_interleaved,
             seq_len_interpolation_factor=seq_len_interpolation_factor,
             rotary_base=self.config.rotary_base,
+            yarn_scaling_factor=(
+                self.config.yarn_rotary_scaling_factor
+                if self.config.mrope_yarn_enabled
+                else None
+            ),
+            yarn_original_max_position_embeddings=getattr(
+                self.config, "yarn_original_max_position_embeddings", 4096
+            ),
+            yarn_beta_fast=getattr(self.config, "yarn_beta_fast", 32.0),
+            yarn_beta_slow=getattr(self.config, "yarn_beta_slow", 1.0),
+            yarn_correction_range_round_to_int=getattr(
+                self.config, "yarn_correction_range_round_to_int", True
+            ),
         )
         self.mrope_section = self.config.mrope_section
         assert self.mrope_section is not None, (
@@ -284,6 +297,13 @@ class Qwen3_5Model(Qwen3_5McaGPTModel, MultimodalEmbeddingMixin):
         force_vit_image = kwargs.pop("force_vit_image", False)
         force_vit_video = kwargs.pop("force_vit_video", False)
         packed_seq_params = kwargs.get("packed_seq_params", None)
+
+        if (
+            labels is not None
+            and self.config.cross_entropy_loss_fusion
+            and self.config.tensor_model_parallel_size > 1
+        ):
+            kwargs.setdefault("output_processor", self.chunked_vocab_parallel_output_processor)
 
         if (
                 position_ids is None or (self.config.mtp_num_layers is not None and self.config.mtp_num_layers > 0)

@@ -422,16 +422,92 @@ class McaGPTModel(GPTModel, PretrainedModel):
             Tensor: Loss tensor of dimensions [batch size, sequence_length]
         """
 
-        if self.config.cross_entropy_loss_fusion and self.config.tensor_model_parallel_size == 1:
-            from ..parallel_functions.fused_cross_entropy import cross_entropy
+        if self.config.cross_entropy_loss_fusion:
+            if self.config.tensor_model_parallel_size == 1:
+                from ..parallel_functions.fused_cross_entropy import cross_entropy
 
-            s, b, d = logits.shape
+                s, b, d = logits.shape
 
-            # [b, s]
-            labels = labels.transpose(0, 1).contiguous().view(-1)
-            logits = logits.view(-1, d)
-            # loss = fused_vocab_parallel_cross_entropy(logits, labels)
-            loss = cross_entropy(logits, labels, reduction="none", ignore_index=-100)
-            loss = loss.view(s, b).transpose(0, 1).contiguous()
-            return loss
+                # [b, s]
+                labels = labels.transpose(0, 1).contiguous().view(-1)
+                logits = logits.view(-1, d)
+                loss = cross_entropy(logits, labels, reduction="none", ignore_index=-100)
+                loss = loss.view(s, b).transpose(0, 1).contiguous()
+                return loss
+
+            labels = labels.transpose(0, 1).contiguous()
+            if self.config.cross_entropy_fusion_impl == "native":
+                from megatron.core.fusions.fused_cross_entropy import (
+                    fused_vocab_parallel_cross_entropy,
+                )
+
+                loss = fused_vocab_parallel_cross_entropy(logits, labels, self.pg_collection.tp)
+            else:
+                from transformer_engine.pytorch import parallel_cross_entropy
+
+                loss = parallel_cross_entropy(
+                    logits,
+                    labels,
+                    dist_process_group=self.pg_collection.tp,
+                    ignore_idx=-100,
+                )
+            return loss.transpose(0, 1).contiguous()
         return super().compute_language_model_loss(labels, logits)
+
+    def chunked_vocab_parallel_output_processor(
+        self,
+        *,
+        hidden_states: torch.Tensor,
+        output_layer: torch.nn.Module,
+        output_weight: Optional[torch.Tensor],
+        labels: torch.Tensor,
+        runtime_gather_output: Optional[bool],
+        compute_language_model_loss,
+        scale_logits,
+        **kwargs,
+    ) -> torch.Tensor:
+        # Bound peak logits/softmax memory while preserving vocab-parallel loss semantics.
+        from torch.utils.checkpoint import checkpoint
+
+        tp_size = self.config.tensor_model_parallel_size
+        local_sequence_length = hidden_states.size(0)
+        assert output_layer.sequence_parallel
+        assert labels.size(1) == local_sequence_length * tp_size
+
+        global_chunk_size = 8192
+        local_chunk_size = max(global_chunk_size // tp_size, 1)
+        losses_by_tp_rank = [[] for _ in range(tp_size)]
+
+        for start in range(0, local_sequence_length, local_chunk_size):
+            end = min(start + local_chunk_size, local_sequence_length)
+            chunk_length = end - start
+            chunk_labels = torch.cat(
+                [
+                    labels[:, rank * local_sequence_length + start : rank * local_sequence_length + end]
+                    for rank in range(tp_size)
+                ],
+                dim=1,
+            ).contiguous()
+
+            def compute_chunk(chunk_hidden_states, labels_for_chunk):
+                chunk_logits, _ = output_layer(
+                    chunk_hidden_states,
+                    weight=output_weight,
+                    runtime_gather_output=runtime_gather_output,
+                )
+                chunk_logits = scale_logits(chunk_logits)
+                return compute_language_model_loss(labels_for_chunk, chunk_logits)
+
+            chunk_loss = checkpoint(
+                compute_chunk,
+                hidden_states[start:end],
+                chunk_labels,
+                use_reentrant=False,
+            )
+            for rank, rank_loss in enumerate(chunk_loss.split(chunk_length, dim=1)):
+                losses_by_tp_rank[rank].append(rank_loss)
+
+        return torch.cat(
+            [torch.cat(rank_losses, dim=1) for rank_losses in losses_by_tp_rank],
+            dim=1,
+        )

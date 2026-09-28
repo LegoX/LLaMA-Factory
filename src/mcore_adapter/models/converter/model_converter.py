@@ -121,6 +121,10 @@ class ModelConverter:
         return {os.path.join(path, file) for file in needed_files}
 
     def is_needed_hf_name(self, name, vp_stage: int):
+        # Some HF checkpoints include auxiliary MTP tensors even when MTP is
+        # disabled for training. Filter them before parsing expert tensor names.
+        if name.startswith("mtp.") and not self.mca_config.mtp_num_layers:
+            return False
         mca_names = self.template.hf_name_to_mca_names(name)
         if mca_names is None:
             return False

@@ -12,6 +12,15 @@ from ..model_config import McaModelConfig
 class Qwen3_5Config(McaModelConfig):
     """Qwen3_5Config"""
 
+    mrope_yarn_enabled: bool = False
+    yarn_rotary_scaling_factor: float = 4.0
+    yarn_original_max_position_embeddings: int = 32768
+    yarn_beta_fast: float = 32.0
+    yarn_beta_slow: float = 1.0
+    yarn_mscale: float = 1.0
+    yarn_mscale_all_dim: float = 0.0
+    yarn_correction_range_round_to_int: bool = True
+
     # Gated Delta Net specific (for linear attention layers)
     layer_types: Optional[list[str]] = None
 

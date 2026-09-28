@@ -319,9 +319,11 @@ class DistributingParallelArguments:
 
 @dataclass
 class MegatronArguments(DistributingParallelArguments):
-    accumulate_allreduce_grads_in_fp32: bool = field(
-        default=False,
-        metadata={"help": "Gradient accumulation and all-reduce in fp32."},
+    accumulate_allreduce_grads_in_fp32: Optional[bool] = field(
+        default=None,
+        metadata={
+            "help": "Gradient accumulation and all-reduce in fp32. Defaults to true for bf16 training."
+        },
     )
     use_distributed_optimizer: bool = field(
         default=False,
@@ -366,8 +368,32 @@ class MegatronArguments(DistributingParallelArguments):
             "to ensure collectives do not become latency-bound)."
         },
     )
+    empty_cache_before_grad_sync: bool = field(
+        default=False,
+        metadata={
+            "help": "Release unused cached CUDA memory after backward and before final gradient synchronization."
+        },
+    )
+    pad_train_samples_to_full_steps: bool = field(
+        default=False,
+        metadata={
+            "help": "Pad each training epoch to a full gradient-accumulation step using rotating samples."
+        },
+    )
+    benchmark_skip_final_save: bool = field(
+        default=False,
+        metadata={"help": "Skip the final model save for disposable benchmark runs."},
+    )
+    benchmark_log_peak_memory: bool = field(
+        default=False,
+        metadata={"help": "Log the maximum CUDA allocated and reserved memory across ranks for each step."},
+    )
 
     optimizer: str = field(default="adam", metadata={"help": "Optimizer function: [adam, sgd]"})
+    use_precision_aware_optimizer: bool = field(
+        default=False,
+        metadata={"help": "Whether to use Megatron's precision-aware optimizer path."},
+    )
     optimizer_cpu_offload: bool = field(
         default=False, metadata={"help": "Whether offload optimizer states tensor and compute to CPU."}
     )
@@ -429,8 +455,8 @@ class MegatronArguments(DistributingParallelArguments):
 @dataclass
 class TrainingArguments(MegatronArguments, HFTrainingArguments):
     def __post_init__(self):
-        if self.bf16:
-            self.accumulate_allreduce_grads_in_fp32 = True
+        if self.accumulate_allreduce_grads_in_fp32 is None:
+            self.accumulate_allreduce_grads_in_fp32 = self.bf16
 
         self.deepspeed = None
         MegatronArguments.__post_init__(self)
@@ -442,8 +468,8 @@ class TrainingArguments(MegatronArguments, HFTrainingArguments):
 @dataclass
 class Seq2SeqTrainingArguments(MegatronArguments, HFSeq2SeqTrainingArguments):
     def __post_init__(self):
-        if self.bf16:
-            self.accumulate_allreduce_grads_in_fp32 = True
+        if self.accumulate_allreduce_grads_in_fp32 is None:
+            self.accumulate_allreduce_grads_in_fp32 = self.bf16
 
         self.deepspeed = None
         MegatronArguments.__post_init__(self)

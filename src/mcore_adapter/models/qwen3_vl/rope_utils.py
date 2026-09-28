@@ -6,6 +6,10 @@ from megatron.core.models.common.embeddings.rope_utils import (
     _apply_rotary_pos_emb_bshd,
     get_pos_emb_on_this_cp_rank,
 )
+from megatron.core.models.common.embeddings.yarn_rotary_pos_embedding import (
+    _yarn_find_correction_range,
+    _yarn_linear_ramp_mask,
+)
 from torch import Tensor, nn
 
 from .config_qwen3_vl import Qwen3VLConfig
@@ -37,6 +41,11 @@ class Qwen3VLMultimodalRotaryEmbedding(nn.Module):
         seq_len_interpolation_factor: float = None,
         rotary_base: int = 10000,
         cp_group: Optional[torch.distributed.ProcessGroup] = None,
+        yarn_scaling_factor: Optional[float] = None,
+        yarn_original_max_position_embeddings: int = 4096,
+        yarn_beta_fast: float = 32.0,
+        yarn_beta_slow: float = 1.0,
+        yarn_correction_range_round_to_int: bool = True,
     ) -> None:
         super().__init__()
 
@@ -47,9 +56,25 @@ class Qwen3VLMultimodalRotaryEmbedding(nn.Module):
         assert not self.rotary_interleaved, "Qwen3VLMultimodalRotaryEmbedding does not support rotary_interleaved"
 
         self.seq_len_interpolation_factor = seq_len_interpolation_factor
-        self.inv_freq = 1.0 / (
+        inv_freq_extra = 1.0 / (
             rotary_base ** (torch.arange(0, dim, 2, dtype=torch.float32, device=torch.cuda.current_device()) / dim)
         )
+        if yarn_scaling_factor is not None:
+            inv_freq_inter = inv_freq_extra / yarn_scaling_factor
+            low, high = _yarn_find_correction_range(
+                yarn_beta_fast,
+                yarn_beta_slow,
+                dim,
+                rotary_base,
+                yarn_original_max_position_embeddings,
+                yarn_correction_range_round_to_int,
+            )
+            inv_freq_mask = 1.0 - _yarn_linear_ramp_mask(
+                low, high, dim // 2, device=inv_freq_extra.device
+            ).to(dtype=torch.float32)
+            self.inv_freq = inv_freq_inter * (1 - inv_freq_mask) + inv_freq_extra * inv_freq_mask
+        else:
+            self.inv_freq = inv_freq_extra
 
         self.cp_group = (
             cp_group if cp_group is not None else parallel_state.get_context_parallel_group(check_initialized=False)
@@ -121,7 +146,7 @@ class Qwen3VLMultimodalRotaryEmbedding(nn.Module):
 
 
 def _apply_rotary_pos_emb_thd_absolute(
-    t: Tensor, cu_seqlens: Tensor, freqs: Tensor, rotary_interleaved: bool = False
+    t: Tensor, cu_seqlens: Tensor, freqs: Tensor, rotary_interleaved: bool = False, mscale: float = 1.0
 ) -> Tensor:
     """Apply RoPE for THD format without additional CP slicing.
 
@@ -142,7 +167,7 @@ def _apply_rotary_pos_emb_thd_absolute(
         Tensor of shape ``[total_tokens, num_heads, head_dim]``.
     """
     return _apply_rotary_pos_emb_bshd(
-        t[:, None], freqs, rotary_interleaved=rotary_interleaved
+        t[:, None], freqs, rotary_interleaved=rotary_interleaved, mscale=mscale
     ).squeeze(1)
 
 
@@ -172,10 +197,13 @@ def apply_rotary_pos_emb_absolute(
         cu_seqlens: Cumulative sequence lengths for THD format (or ``None``).
         **kwargs: Ignored (absorbs ``mscale``, ``cp_group`` from caller).
     """
+    # YaRN mscale scales cos/sin of the rotary dims only, as in the standard Megatron path and HF;
+    # scaling the whole result would also scale the pass-through dims under partial rotary.
+    mscale = kwargs.get("mscale", 1.0) if getattr(config, "mrope_yarn_enabled", False) else 1.0
     if cu_seqlens is None:
-        return _apply_rotary_pos_emb_bshd(t, freqs, rotary_interleaved=config.rotary_interleaved)
+        return _apply_rotary_pos_emb_bshd(t, freqs, rotary_interleaved=config.rotary_interleaved, mscale=mscale)
     return _apply_rotary_pos_emb_thd_absolute(
-        t, cu_seqlens, freqs, rotary_interleaved=config.rotary_interleaved
+        t, cu_seqlens, freqs, rotary_interleaved=config.rotary_interleaved, mscale=mscale
     )
 
 # copy from transformers==4.57.0
