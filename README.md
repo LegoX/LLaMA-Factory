@@ -1,5 +1,7 @@
 ![# LlamaFactory](assets/logo.png)
 
+> **Qwen3.6-27B Ascend branch:** based on the validated upstream commit `6d1059c` (LlamaFactory `0.9.6.dev0`), with a standalone YAML-driven NPU training launcher. See [setup, configuration and validation scope](examples/ascend/qwen36_27b/README.md).
+
 [![GitHub Repo stars](https://img.shields.io/github/stars/hiyouga/LlamaFactory?style=social)](https://github.com/hiyouga/LlamaFactory/stargazers)
 [![GitHub last commit](https://img.shields.io/github/last-commit/hiyouga/LlamaFactory)](https://github.com/hiyouga/LlamaFactory/commits/main)
 [![GitHub contributors](https://img.shields.io/github/contributors/hiyouga/LlamaFactory?color=orange)](https://github.com/hiyouga/LlamaFactory/graphs/contributors)

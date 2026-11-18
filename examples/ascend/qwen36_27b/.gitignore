@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.log
+*.safetensors
+*.distcp
+*.pt
+*.pth
+checkpoint-*/
+outputs/
+runs/
+tokenized/
+.env
+.env.*

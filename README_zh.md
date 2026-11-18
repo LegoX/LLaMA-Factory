@@ -1,5 +1,7 @@
 ![# LlamaFactory](assets/logo.png)
 
+> **Qwen3.6-27B 昇腾训练分支**：基于已验证的官方提交 `6d1059c`（LlamaFactory `0.9.6.dev0`），包含 YAML 驱动的 NPU 训练入口。安装本分支源码即可使用；[配置、启动与验证范围](examples/ascend/qwen36_27b/README.md)。
+
 [![GitHub Repo stars](https://img.shields.io/github/stars/hiyouga/LlamaFactory?style=social)](https://github.com/hiyouga/LlamaFactory/stargazers)
 [![GitHub last commit](https://img.shields.io/github/last-commit/hiyouga/LlamaFactory)](https://github.com/hiyouga/LlamaFactory/commits/main)
 [![GitHub contributors](https://img.shields.io/github/contributors/hiyouga/LlamaFactory?color=orange)](https://github.com/hiyouga/LlamaFactory/graphs/contributors)
