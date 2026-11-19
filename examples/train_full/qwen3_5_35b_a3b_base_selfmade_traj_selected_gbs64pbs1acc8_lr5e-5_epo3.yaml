@@ -1,5 +1,5 @@
 ### model
-model_name_or_path: /jyx_data/models/Qwen/Qwen3.5-35B-A3B-Base
+model_name_or_path: Qwen/Qwen3.5-35B-A3B-Base
 trust_remote_code: true
 
 ### method

@@ -64,8 +64,43 @@ Read technical notes:
 > [!NOTE]
 > Except for the above links, all other websites are unauthorized third-party websites. Please carefully use them.
 
+## Relationship to Upstream LLaMA-Factory
+
+**This repository is a fork of [hiyouga/LLaMA-Factory](https://github.com/hiyouga/LLaMA-Factory).** The upstream documentation below is retained alongside the fork-specific guides.
+
+This fork adds long-context SFT for **Qwen3.5/3.6/3.8**, supervision controls, pre-update scoring and HF export. The [integration guide](docs/long_context_sft.md) records provenance, supported combinations and validation limits. The earlier Qwen3.5-35B-A3B-Base 128K multi-node setup remains available in the [SFT quickstart](docs/qwen3_5_35b_sft_quickstart.md).
+
+**What this fork adds on top of upstream:**
+
+| Area | Change |
+|---|---|
+| `src/mcore_adapter/` | Vendored Megatron adapter with long-context RoPE, CP packing and precision-aware optimizer support |
+| `src/llamafactory/data/`, `hparams/`, `train/` | Qwen3.8 templates, supervision masks and weights, pre-update scoring and training diagnostics |
+| `src/llamafactory/model/model_utils/` | HF export and metadata repair, plus Liger compatibility fixes for Qwen MoE models |
+| `examples/megatron/512k/` | Common Megatron launcher, pinned environment setup and preflight checks |
+| `src/llamafactory/train/sft/trainer.py` | Weighted HF SFT and checkpoint sharding at 5 GB |
+| `install_env.sh` | Reproducible environment installer with the dependency versions this setup was validated against |
+| `run_sft_qwen3_5_35b_a3b_base.sh` | Multi-node SFT launcher: rendezvous, fixed global batch size, auto-resume and retry |
+| `examples/train_full/` | Full-SFT configs for Qwen3.5-35B-A3B |
+| `webui/` | A standalone training dashboard for monitoring runs |
+| `docs/` | [SFT quickstart](docs/qwen3_5_35b_sft_quickstart.md) and [multi-node/long-context notes](docs/qwen3_5_moe_sft_multinode_notes.md) |
+
+**Merge policy.** Upstream updates are merged while retaining the fork's training features and regression tests. To inspect the changes relative to upstream:
+
+```bash
+git remote add upstream https://github.com/hiyouga/LLaMA-Factory.git
+git fetch upstream
+git log --oneline upstream/main..HEAD    # commits unique to this fork
+git diff --stat upstream/main...HEAD     # files this fork touches
+```
+
+The current fork point is upstream [`6b9df75a`](https://github.com/hiyouga/LLaMA-Factory/commit/6b9df75ab9823d69c8c66a309389350585fbe728) (2026-05-13).
+
+**Credentials.** No API keys, tokens or credentials belong in this repository. Supply them at runtime. `run_sft_qwen3_5_35b_a3b_base.sh` requires `WANDB_API_KEY`; the common Megatron launcher does not require W&B when external reporting is disabled.
+
 ## Table of Contents
 
+- [Relationship to Upstream LLaMA-Factory](#relationship-to-upstream-llama-factory)
 - [Features](#features)
 - [Blogs](#blogs)
 - [Changelog](#changelog)

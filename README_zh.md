@@ -66,8 +66,43 @@ https://github.com/user-attachments/assets/43b700c6-a178-41db-b1f8-8190a5d3fcfc
 > [!NOTE]
 > 除上述链接以外的其他网站均为未经许可的第三方网站，请小心甄别。
 
+## 与官方版本的关系
+
+**本仓库是 [hiyouga/LLaMA-Factory](https://github.com/hiyouga/LLaMA-Factory) 的 fork。** 下文保留官方文档，同时提供本 fork 的功能指南。
+
+本 fork 增加了 **Qwen3.5/3.6/3.8** 长上下文 SFT、监督控制、训练前打分和 HF 导出。[集成指南](docs/long_context_sft.md) 记录了代码来源、支持组合和验证范围。此前的 Qwen3.5-35B-A3B-Base 128K 多机方案仍可参阅 [SFT 快速上手](docs/qwen3_5_35b_sft_quickstart.md)。
+
+**本 fork 在官方版本之上新增的内容：**
+
+| 范围 | 改动 |
+|---|---|
+| `src/mcore_adapter/` | 仓内维护的 Megatron adapter，包含长上下文 RoPE、CP packing 和 precision-aware optimizer |
+| `src/llamafactory/data/`、`hparams/`、`train/` | Qwen3.8 模板、监督 mask 与权重、训练前打分和训练诊断 |
+| `src/llamafactory/model/model_utils/` | HF 导出与元数据修复，以及 Qwen MoE 模型的 Liger 兼容修复 |
+| `examples/megatron/512k/` | Megatron 通用启动器、固定版本环境安装和 preflight 检查 |
+| `src/llamafactory/train/sft/trainer.py` | HF SFT 加权损失和 5 GB checkpoint 分片 |
+| `install_env.sh` | 可复现的环境安装脚本，固定了经过验证的依赖版本 |
+| `run_sft_qwen3_5_35b_a3b_base.sh` | 多机 SFT 启动脚本：地址协商、固定全局 batch size、自动续训与重试 |
+| `examples/train_full/` | Qwen3.5-35B-A3B 全参数 SFT 配置 |
+| `webui/` | 独立的训练监控面板 |
+| `docs/` | [SFT 快速上手](docs/qwen3_5_35b_sft_quickstart.md)、[多机与长上下文排查笔记](docs/qwen3_5_moe_sft_multinode_notes.md)（英文） |
+
+**合并策略。** 合入官方更新时保留本 fork 的训练功能和回归测试。查看当前与官方的差异范围：
+
+```bash
+git remote add upstream https://github.com/hiyouga/LLaMA-Factory.git
+git fetch upstream
+git log --oneline upstream/main..HEAD    # 仅属于本 fork 的提交
+git diff --stat upstream/main...HEAD     # 本 fork 改动到的文件
+```
+
+当前 fork 基点为官方 [`6b9df75a`](https://github.com/hiyouga/LLaMA-Factory/commit/6b9df75ab9823d69c8c66a309389350585fbe728)（2026-05-13）。
+
+**关于密钥。** 本仓库不应出现任何 API key、token 或凭据，请在运行时提供。`run_sft_qwen3_5_35b_a3b_base.sh` 要求设置 `WANDB_API_KEY`；Megatron 通用启动器在关闭外部日志上报时不要求使用 W&B。
+
 ## 目录
 
+- [与官方版本的关系](#与官方版本的关系)
 - [项目特色](#项目特色)
 - [官方博客](#官方博客)
 - [更新日志](#更新日志)

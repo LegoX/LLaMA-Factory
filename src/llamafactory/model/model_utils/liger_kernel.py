@@ -103,6 +103,7 @@ def apply_liger_kernel(
         # Liger's swiglu/rms_norm class swaps for Qwen3 MoE models can cause illegal
         # memory accesses under ZeRO-3. Keep only fused_linear_cross_entropy, which
         # is the part that resolves the long-context loss-stage OOM.
+        # See docs/qwen3_5_moe_sft_multinode_notes.md, section 7.
         kwargs.update({"swiglu": False, "rms_norm": False})
 
     apply_liger_kernel(**kwargs)
