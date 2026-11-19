@@ -129,6 +129,33 @@ def load_hyper_parallel_model(
 
         model = apply_v1_kernels(model, use_v1_kernels=model_args.use_v1_kernels)
 
+    if finetuning_args.npu_gpu_alignment:
+        distributed_setup.strategy_config.mix_precision.output_dtype = None
+
+    if finetuning_args.npu_long_context:
+        if hp_args.activation_mode != "none":
+            raise ValueError("Grouped long-context checkpointing requires hyper activation_mode=none")
+        if hp_args.cp_size > 1:
+            from .long_context import install_cp
+            install_cp(model, distributed_setup.mesh_context.cp_mesh, finetuning_args.npu_checkpoint_group_size)
+        else:
+            from .long_context import install
+            install(model, group_size=finetuning_args.npu_checkpoint_group_size)
+        # Match the proven Qwen3.6 memory boundaries without changing backend.
+        strategy = distributed_setup.strategy_config
+        strategy.wrapper_class = ["Qwen3_5DecoderLayer", "Qwen3_5VisionBlock"]
+        if finetuning_args.npu_shard_embedding_head:
+            strategy.wrapper_class += ["Embedding", "CPChunkedLossHead" if hp_args.cp_size > 1 else "ChunkedLossHead"]
+        forward_depth = finetuning_args.npu_forward_prefetch_depth
+        backward_depth = finetuning_args.npu_backward_prefetch_depth
+        if forward_depth not in (0, 1, 2) or backward_depth not in (0, 1, 2):
+            raise ValueError("Long-context prefetch depth must be 0, 1, or 2")
+        strategy.forward_prefetch_depth = forward_depth
+        strategy.backward_prefetch_depth = backward_depth
+        # Chunked CE is computed in FP32; do not quantize its scalar return to BF16.
+        strategy.mix_precision.output_dtype = None
+        logger.info_rank0(f"Long-context FSDP: separate_embedding_head={finetuning_args.npu_shard_embedding_head}, prefetch={forward_depth}/{backward_depth}, preserve output dtype")
+
     activation_mode = hp_args.activation_mode
     model = parallelize_model(
         model,
@@ -138,6 +165,9 @@ def load_hyper_parallel_model(
         swap_inputs=activation_mode == "swap" and hp_args.activation_swap_inputs,
     )
 
+    if finetuning_args.npu_long_context and hp_args.cp_size > 1:
+        from .long_context.nested_checkpoint import install_nested_checkpoint
+        install_nested_checkpoint(model)
     _validate_conv3d_compatibility(model, model_args)
     if not is_trainable:
         model.requires_grad_(False)

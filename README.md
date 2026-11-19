@@ -1000,3 +1000,8 @@ If this work is helpful, please kindly cite as:
 ## Acknowledgement
 
 This repo benefits from [PEFT](https://github.com/huggingface/peft), [TRL](https://github.com/huggingface/trl), [QLoRA](https://github.com/artidoro/qlora) and [FastChat](https://github.com/lm-sys/FastChat). Thanks for their wonderful works.
+
+
+## Qwen NPU training
+
+This branch includes the shared Torch 2.10 / HyperParallel entry for Qwen3.6-27B and Qwen3.8-27B. See [configuration, installation, and validation limits](examples/ascend/qwen_npu/README.md).

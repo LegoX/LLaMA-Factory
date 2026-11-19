@@ -42,6 +42,7 @@ from hyper_parallel.integration.llamafactory import (
 from torch import nn
 
 from ..sft.trainer import CustomSeq2SeqTrainer
+from .alignment import PaddedSequentialSampler, AlignmentCallback, audit_microbatch
 
 
 logger = logging.getLogger(__name__)
@@ -369,6 +370,14 @@ class HyperParallelTrainer(CustomSeq2SeqTrainer):
         if not getattr(self.accelerator, "is_fsdp2", False):
             raise ValueError("HyperParallel trainer requires Accelerate FSDP2 mode to be enabled.")
 
+        self._npu_alignment = bool(finetuning_args.npu_gpu_alignment)
+        if self._npu_alignment:
+            if self.args.per_device_train_batch_size != 1:
+                raise ValueError("GPU alignment requires microbatch=1")
+            self.model_accepts_loss_kwargs = False
+            self._alignment_micro_step = 0
+            self.add_callback(AlignmentCallback(finetuning_args.npu_validation_steps))
+
         self._cp_size = hp_args.cp_size
         self._cp_mesh = distributed_setup.mesh_context.cp_mesh
         if self._cp_size > 1 and self._cp_mesh is None:
@@ -423,7 +432,10 @@ class HyperParallelTrainer(CustomSeq2SeqTrainer):
                         continue
                     model_param_ids = {id(param) for param in model.parameters()}
                     if parameter_ids and parameter_ids.issubset(model_param_ids):
-                        return hp_clip_grad_norm_(parameter_list, max_norm, norm_type=norm_type)
+                        norm = hp_clip_grad_norm_(parameter_list, max_norm, norm_type=norm_type)
+                        if not bool(torch.isfinite(norm)):
+                            raise FloatingPointError("Nonfinite global gradient norm; refusing optimizer update")
+                        return norm
             return self._orig_accelerator_clip_grad_norm(parameters, max_norm, norm_type=norm_type)
 
         self.accelerator.clip_grad_norm_ = types.MethodType(_hp_clip_grad_norm, self.accelerator)
@@ -454,13 +466,25 @@ class HyperParallelTrainer(CustomSeq2SeqTrainer):
         """Match the no-CP baseline sampler semantics before CP repeats whole logical batches."""
         if train_dataset is None:
             train_dataset = self.train_dataset
+        if self._npu_alignment:
+            return PaddedSequentialSampler(train_dataset, self.args.gradient_accumulation_steps * (dist.get_world_size() // self._cp_size))
         if getattr(self.finetuning_args, "disable_shuffling", False):
             return torch.utils.data.SequentialSampler(train_dataset)
         return super()._get_train_sampler(train_dataset)
 
+    def get_decay_parameter_names(self, model):
+        if self._npu_alignment:
+            return [name for name, parameter in model.named_parameters() if parameter.ndim != 1 and not name.endswith(".bias")]
+        return super().get_decay_parameter_names(model)
+
+    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None, **kwargs):
+        if self._npu_alignment:
+            num_items_in_batch = None
+        return super().compute_loss(model, inputs, return_outputs=return_outputs, num_items_in_batch=num_items_in_batch, **kwargs)
+
     def _build_cp_batch_sampler(self, dataset, shuffle: bool, batch_size: int, drop_last: bool):
         """Repeat complete logical batches so CP groups consume the same baseline batch."""
-        sampler = self._get_train_sampler(dataset) if shuffle else torch.utils.data.SequentialSampler(dataset)
+        sampler = self._get_train_sampler(dataset) if shuffle or self._npu_alignment else torch.utils.data.SequentialSampler(dataset)
         return _CPBatchRepeatedBatchSampler(
             sampler,
             batch_size=batch_size,
@@ -563,13 +587,21 @@ class HyperParallelTrainer(CustomSeq2SeqTrainer):
         model.train()
         inputs = self._prepare_inputs(inputs)
 
+        audit_inputs = inputs
         if self._cp_size > 1:
-            if self._model_shards_cp_inputs:
+            if self._npu_alignment:
+                from .cp_alignment import prepare_cp_inputs
+                inputs = prepare_cp_inputs(inputs, self._cp_mesh)
+            elif self._model_shards_cp_inputs:
                 inputs = _pad_inputs_for_model_cp(inputs, self._cp_mesh)
             else:
                 inputs = _shard_inputs_for_cp(inputs, self._cp_mesh)
 
         sync_gradients = getattr(self.accelerator, "sync_gradients", True)
+        if self._npu_alignment:
+            # Keep accumulated gradients sharded after every microbatch; full 27B
+            # gradients cannot remain resident between accumulation microsteps.
+            sync_gradients = True
         if isinstance(model, HSDPModule):
             model.set_is_last_backward(sync_gradients)
             model.set_requires_gradient_sync(sync_gradients)
@@ -592,12 +624,34 @@ class HyperParallelTrainer(CustomSeq2SeqTrainer):
         # The loss already accounts for the accumulation window, either via
         # num_items_in_batch or the explicit division above. Compensate the
         # additional scaling inside Accelerator.backward() so it happens once.
+        if self._npu_alignment and not bool(torch.isfinite(loss)):
+            raise FloatingPointError("Nonfinite SFT loss; refusing backward")
         backward_loss = loss * self.accelerator.gradient_accumulation_steps
         self.accelerator.backward(backward_loss)
 
         if isinstance(model, HSDPModule) and sync_gradients:
             hsdp_sync_stream()
 
+        if self._npu_alignment:
+            import os
+            if os.getenv("QWEN38_GRAD_DIAGNOSTIC") == "1" or self.finetuning_args.npu_validation_steps > 0:
+                import json
+                from pathlib import Path
+                invalid = []
+                for name, parameter in model.named_parameters():
+                    gradient = parameter.grad
+                    if gradient is not None:
+                        local = gradient.to_local() if hasattr(gradient, "to_local") else gradient
+                        if not bool(torch.isfinite(local).all()):
+                            invalid.append(name)
+                path = Path(self.args.output_dir)/f"grad-audit-rank{self.args.process_index}-micro{self._alignment_micro_step}.json"
+                path.write_text(json.dumps({"invalid_parameters": invalid}, indent=2))
+                if invalid:
+                    raise FloatingPointError(f"Nonfinite gradient in {len(invalid)} parameters; first: {invalid[:4]}")
+            if self.finetuning_args.npu_validation_steps > 0 or os.getenv("QWEN38_HOST_CACHE_RELEASE") == "1":
+                from .host_memory import audit_host_memory
+                audit_host_memory(self.args.output_dir, self.args.process_index, self._alignment_micro_step)
+            audit_microbatch(self, audit_inputs, loss.detach())
         return loss.detach()
 
     def create_optimizer(self, *args, **kwargs):

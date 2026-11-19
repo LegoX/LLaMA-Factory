@@ -1,0 +1,25 @@
+{
+  "enable_offload": true,
+  "activation_mode": "none",
+  "param_dtype": "bfloat16",
+  "reduce_dtype": "float32",
+  "cp_size": 4,
+  "plan_overrides": [
+    {
+      "match": "*.self_attn.forward",
+      "when": "cp",
+      "replace": {
+        "kind": "method",
+        "implementation": "hyper_parallel.distributed.context_parallel.wrappers.sdpa_hf_ulysses_cp_wrapper"
+      }
+    },
+    {
+      "match": "*.linear_attn.forward",
+      "when": "cp",
+      "replace": {
+        "kind": "method",
+        "implementation": "hyper_parallel.distributed.context_parallel.wrappers.gdn_ulysses_cp_wrapper"
+      }
+    }
+  ]
+}

@@ -1,0 +1,281 @@
+diff --git a/hyper_parallel/core/fully_shard/state_dict_utils.py b/hyper_parallel/core/fully_shard/state_dict_utils.py
+index fa3b099..905b539 100644
+--- a/hyper_parallel/core/fully_shard/state_dict_utils.py
++++ b/hyper_parallel/core/fully_shard/state_dict_utils.py
+@@ -59,6 +59,15 @@ def _gather_full_state_dict(
+     gathered: dict[str, Any] = {}
+     for key, val in state_dict.items():
+         if isinstance(val, DTensor):
++            local_tensor = val.to_local()
++            if local_tensor.device.type == "cpu" and val.device_mesh.device_type != "cpu":
++                # Accelerator process groups cannot gather host-offloaded shards.
++                # Stage only this tensor, leaving the live model parameters on CPU.
++                val = DTensor.from_local(
++                    local_tensor.to(val.device_mesh.device_type),
++                    val.device_mesh,
++                    val.layout.alias_placements,
++                )
+             val = val.full_tensor()
+         if cpu_offload:
+             if not is_rank0:
+diff --git a/hyper_parallel/integration/llamafactory/utils.py b/hyper_parallel/integration/llamafactory/utils.py
+index 3e59640..4a6a40f 100644
+--- a/hyper_parallel/integration/llamafactory/utils.py
++++ b/hyper_parallel/integration/llamafactory/utils.py
+@@ -24,6 +24,9 @@ from pathlib import Path
+ import torch
+ import torch.distributed as dist
+ from torch import nn
++from safetensors.torch import save_file
++
++from hyper_parallel.core.fully_shard.state_dict_utils import _gather_full_state_dict
+ 
+ from hyper_parallel import SkipDTensorDispatch
+ from hyper_parallel.core.dtensor.dtensor import DTensor
+@@ -86,6 +89,7 @@ class HyperParallelArguments:
+     reduce_dtype: str | None = None
+     reshard_after_forward: bool | None = None
+     fsdp_size: int | None = None
++    enable_offload: bool = False
+     plan_overrides: list[dict] | None = None
+ 
+     activation_mode: str = "none"
+@@ -161,6 +165,8 @@ class HyperParallelArguments:
+                 "reshard_after_forward must be a bool when provided, "
+                 f"got {type(self.reshard_after_forward).__name__}."
+             )
++        if not isinstance(self.enable_offload, bool):
++            raise ValueError("enable_offload must be a bool.")
+         valid_activation_modes = {"none", "recompute", "swap"}
+         if self.activation_mode not in valid_activation_modes:
+             raise ValueError(
+@@ -207,6 +213,7 @@ class HyperParallelArguments:
+         strategy_config = FSDP2Config(
+             dp_shard_size=dp_shard_size,
+             edp_shard_size=edp_shard_size,
++            enable_offload=self.enable_offload,
+             mix_precision=FSDP2MixedPrecisionConfig(
+                 param_dtype=param_dtype,
+                 reduce_dtype=reduce_dtype,
+@@ -315,7 +322,7 @@ def parallelize_model(
+         distributed_setup=distributed_setup,
+         device=device,
+     )
+-    return apply_model_infrastructure(
++    model = apply_model_infrastructure(
+         model,
+         mesh=distributed_setup.mesh_context,
+         sharding_planner=sharding_planner,
+@@ -332,6 +339,16 @@ def parallelize_model(
+         swap_inputs=swap_inputs,
+         model_init_dtype=model_init_dtype,
+     )
++    strategy = getattr(distributed_setup, "strategy_config", None)
++    if getattr(strategy, "enable_offload", False):
++        # FSDP CPU offload requires host-resident parameter shards at lazy init;
++        # buffers still execute on the selected accelerator.
++        model._apply(lambda tensor: tensor.to("cpu", copy=True))  # pylint: disable=protected-access
++        for module in model.modules():
++            for name, buffer in module._buffers.items():  # pylint: disable=protected-access
++                if buffer is not None:
++                    module._buffers[name] = buffer.to(device)  # pylint: disable=protected-access
++    return model
+ 
+ 
+ # ---------------------------------------------------------------------------
+@@ -457,6 +474,59 @@ def wrap_optimizer_with_skip_dtensor_dispatch(optimizer) -> None:
+ # ---------------------------------------------------------------------------
+ 
+ 
++def _export_streaming_hf(model: nn.Module, tokenizer, export_dir: Path, shard_bytes: int = 2_000_000_000) -> None:
++    """Gather one tensor at a time and bound rank-zero export buffering.
++
++    Model and optimizer state remain intact so the same exporter is safe during
++    training. The index is published only after all weight shards are written.
++    """
++    rank_zero = dist.get_rank() == 0
++    if rank_zero:
++        export_dir.mkdir(parents=True, exist_ok=True)
++    pending = {}
++    pending_bytes = 0
++    total_bytes = 0
++    weight_map = {}
++    shard_number = 0
++
++    def flush() -> None:
++        nonlocal pending_bytes, shard_number
++        if not pending:
++            return
++        shard_number += 1
++        filename = f"model-{shard_number:05d}.safetensors"
++        save_file(pending, str(export_dir / filename), metadata={"format": "pt"})
++        weight_map.update({name: filename for name in pending})
++        pending.clear()
++        pending_bytes = 0
++
++    with torch.no_grad():
++        for name, value in model.state_dict().items():
++            gathered = _gather_full_state_dict({name: value}, cpu_offload=True)
++            if not rank_zero:
++                continue
++            tensor = gathered.pop(name)
++            size = tensor.numel() * tensor.element_size()
++            if pending and pending_bytes + size > shard_bytes:
++                flush()
++            # Shared/tied storage must be serialized independently across shards.
++            pending[name] = tensor.detach().contiguous().clone()
++            pending_bytes += size
++            total_bytes += size
++            del tensor
++        if rank_zero:
++            flush()
++            model.config.save_pretrained(str(export_dir))
++            if getattr(model, "generation_config", None) is not None:
++                model.generation_config.save_pretrained(str(export_dir))
++            if tokenizer is not None:
++                tokenizer.save_pretrained(str(export_dir))
++            index = {"metadata": {"total_size": total_bytes}, "weight_map": weight_map}
++            (export_dir / "model.safetensors.index.json").write_text(json.dumps(index, indent=2), encoding="utf-8")
++    if dist.get_world_size() > 1:
++        dist.barrier()
++
++
+ def export_to_hf_format(model: nn.Module, tokenizer, save_dir: str) -> None:
+     """Gather full state dict via HyperParallel and save in HuggingFace-compatible format."""
+     from torch.distributed.checkpoint.state_dict import (  # pylint: disable=import-outside-toplevel
+@@ -468,6 +538,9 @@ def export_to_hf_format(model: nn.Module, tokenizer, save_dir: str) -> None:
+     )
+ 
+     export_dir = Path(save_dir)
++    if hasattr(model, "config") and hasattr(model.config, "save_pretrained"):
++        _export_streaming_hf(model, tokenizer, export_dir)
++        return
+     options = StateDictOptions(full_state_dict=True, cpu_offload=True)
+     state_dict = get_distributed_model_state_dict(model, options=options)
+ 
+diff --git a/tests/torch/integration/llamafactory/ut/test_trainer.py b/tests/torch/integration/llamafactory/ut/test_trainer.py
+index e979427..dd44360 100644
+--- a/tests/torch/integration/llamafactory/ut/test_trainer.py
++++ b/tests/torch/integration/llamafactory/ut/test_trainer.py
+@@ -19,10 +19,12 @@ Trainer tests live on the LlamaFactory side.
+ """
+ 
+ # pylint: disable=wrong-import-position,protected-access
++import json
+ from types import SimpleNamespace
+ 
+ import pytest
+ import torch
++from safetensors.torch import load_file
+ 
+ import hyper_parallel.integration.llamafactory.utils as lf_utils
+ from hyper_parallel.core.optimizer.optimizer import ChainedOptimizer
+@@ -327,3 +329,61 @@ def test_parallel_args_fsdp_size_rejects_non_int():
+         args = HyperParallelArguments(fsdp_size=bad)
+         with pytest.raises(ValueError, match="fsdp_size"):
+             args.validate()
++
++
++@pytest.mark.parametrize("enabled", [False, True])
++def test_parallel_args_propagate_cpu_offload(monkeypatch, enabled):
++    """Configured CPU offload must reach the FSDP strategy instead of being ignored."""
++    monkeypatch.setattr(lf_utils.dist, "get_world_size", lambda: 2)
++    monkeypatch.setattr(lf_utils.MeshContext, "build_meshs", lambda *args: None)
++    args = HyperParallelArguments.from_dict({"enable_offload": enabled, "device_type": "npu"})
++    setup = args.build_distributed_setup()
++    assert setup.strategy_config.enable_offload is enabled
++
++
++@pytest.mark.parametrize("value", ["true", 1, None])
++def test_parallel_args_reject_invalid_offload(value):
++    """Do not silently coerce misspecified offload values."""
++    with pytest.raises(ValueError, match="enable_offload"):
++        HyperParallelArguments.from_dict({"enable_offload": value})
++
++
++def test_parallelize_model_offload_preserves_loaded_values(monkeypatch):
++    """Moving loaded shards to the host must preserve their values and buffers."""
++    model = torch.nn.Linear(2, 2, device="meta")
++    model.register_buffer("offset", torch.empty(1, device="meta"))
++    setup = SimpleNamespace(mesh_context=object(), strategy_config=SimpleNamespace(enable_offload=True))
++    monkeypatch.setattr(model_builder, "instantiate_infrastructure", lambda **kwargs: ("planner", "manager"))
++
++    def materialize(input_model, **kwargs):
++        input_model.to_empty(device="cpu")
++        with torch.no_grad():
++            input_model.weight.fill_(3)
++            input_model.bias.fill_(2)
++            input_model.offset.fill_(1)
++        return input_model
++
++    monkeypatch.setattr(model_builder, "apply_model_infrastructure", materialize)
++    result = lf_utils.parallelize_model(model, setup, device=torch.device("cpu"))
++    assert all(parameter.device.type == "cpu" for parameter in result.parameters())
++    torch.testing.assert_close(result.weight, torch.full((2, 2), 3.0))
++    torch.testing.assert_close(result.bias, torch.full((2,), 2.0))
++    torch.testing.assert_close(result.offset, torch.ones(1))
++
++
++def test_streaming_hf_export_preserves_values_and_shard_index(monkeypatch, tmp_path):
++    """Bounded export must keep all parameter values and leave the model intact."""
++    model = torch.nn.Linear(4, 3)
++    expected = {name: value.clone() for name, value in model.state_dict().items()}
++    model.config = SimpleNamespace(save_pretrained=lambda path: None)
++    monkeypatch.setattr(lf_utils.dist, "get_rank", lambda: 0)
++    monkeypatch.setattr(lf_utils.dist, "get_world_size", lambda: 1)
++    monkeypatch.setattr(lf_utils.dist, "is_initialized", lambda: False)
++    lf_utils._export_streaming_hf(model, None, tmp_path, shard_bytes=48)
++    index = json.loads((tmp_path / "model.safetensors.index.json").read_text())
++    assert index["metadata"]["total_size"] == 60
++    assert len(set(index["weight_map"].values())) == 2
++    for name, original in expected.items():
++        actual = load_file(str(tmp_path / index["weight_map"][name]))[name]
++        torch.testing.assert_close(actual, original, rtol=0, atol=0)
++        torch.testing.assert_close(model.state_dict()[name], original, rtol=0, atol=0)
+diff --git a/tests/ut/core/fully_shard/test_state_dict_utils.py b/tests/ut/core/fully_shard/test_state_dict_utils.py
+index 1c18d2b..4b58fd2 100644
+--- a/tests/ut/core/fully_shard/test_state_dict_utils.py
++++ b/tests/ut/core/fully_shard/test_state_dict_utils.py
+@@ -34,7 +34,7 @@ class FakeDTensor:
+ 
+     def __init__(self, local):
+         self._local = local
+-        self.device_mesh = "mesh"
++        self.device_mesh = SimpleNamespace(device_type="cpu")
+         self.layout = SimpleNamespace(alias_placements=("shard",))
+ 
+     def full_tensor(self):
+@@ -72,6 +72,24 @@ class TestTorchStateDictUtils(unittest.TestCase):
+         gathered = state_dict_utils._gather_full_state_dict(state, cpu_offload=True)
+         self.assertEqual(gathered["dt"].device.type, "cpu")
+ 
++    @patch("hyper_parallel.core.fully_shard.state_dict_utils.DTensor", FakeDTensor)
++    @patch("hyper_parallel.core.fully_shard.state_dict_utils.dist")
++    def test_gather_host_shard_stages_on_mesh_device_without_mutating_source(self, mock_dist):
++        """Host shards must use the accelerator before accelerator-group collectives."""
++        mock_dist.is_initialized.return_value = False
++        local = MagicMock()
++        local.device.type = "cpu"
++        local.to.return_value = torch.tensor([3.0])
++        original = FakeDTensor(local)
++        original.device_mesh = SimpleNamespace(device_type="npu")
++
++        result = state_dict_utils._gather_full_state_dict({"weight": original}, cpu_offload=True)
++
++        local.to.assert_called_once_with("npu")
++        self.assertIs(original.to_local(), local)
++        self.assertEqual(FakeDTensor.from_local_calls[0][1:], (original.device_mesh, ("shard",)))
++        torch.testing.assert_close(result["weight"], torch.tensor([13.0]))
++
+     @patch("hyper_parallel.core.fully_shard.state_dict_utils.DTensor", FakeDTensor)
+     @patch("hyper_parallel.core.fully_shard.state_dict_utils.dist")
+     def test_gather_full_state_dict_cpu_offload_non_rank0_returns_empty(self, mock_dist):
+@@ -91,7 +109,7 @@ class TestTorchStateDictUtils(unittest.TestCase):
+         offloaded = state_dict_utils._offload_sharded_state_dict(state)
+ 
+         self.assertIsInstance(offloaded["dt"], FakeDTensor)
+-        self.assertEqual(FakeDTensor.from_local_calls[0][1:], ("mesh", ("shard",)))
++        self.assertEqual(FakeDTensor.from_local_calls[0][1:], (state["dt"].device_mesh, ("shard",)))
+         self.assertEqual(offloaded["plain"].device.type, "cpu")
+ 
+     def test_get_model_state_dict_validates_broadcast_and_ignores_frozen_params(self):

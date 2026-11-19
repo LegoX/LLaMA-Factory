@@ -506,6 +506,13 @@ class FinetuningArguments(
             )
         },
     )
+    npu_gpu_alignment: bool = field(default=False, metadata={"help": "Opt-in sequential, sample-mean GPU alignment for text-only microbatch-one FSDP."})
+    npu_long_context: bool = field(default=False, metadata={"help": "Opt-in bounded CE/MLP/norm/GDN and grouped activation offload."})
+    npu_validation_steps: int = field(default=0, metadata={"help": "Stop after this many optimizer steps without changing the full-run LR schedule; 0 disables."})
+    npu_shard_embedding_head: bool = field(default=True, metadata={"help": "Isolate embedding and chunked loss head as FSDP units in the experimental long-context path."})
+    npu_checkpoint_group_size: int = field(default=4, metadata={"help": "Long-context decoder layers per checkpoint group."})
+    npu_forward_prefetch_depth: int = field(default=0, metadata={"help": "HyperParallel forward prefetch depth for capacity/performance validation."})
+    npu_backward_prefetch_depth: int = field(default=0, metadata={"help": "HyperParallel backward prefetch depth for capacity/performance validation."})
     hyper_parallel_args: str | None = field(
         default=None,
         metadata={
