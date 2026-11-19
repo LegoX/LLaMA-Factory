@@ -1,7 +1,7 @@
 import functools
 import os
 import time
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 import torch
 from megatron.core import mpu, tensor_parallel
@@ -16,7 +16,12 @@ from megatron.core.transformer.module import MegatronModule
 from transformers.tokenization_utils import PreTrainedTokenizer
 from transformers.utils import is_peft_available
 
-from ..checkpointing import find_dist_ckpt, generate_model_state_dict, load_state_dict_from_checkpoint, save_config_and_state_dict
+from ..checkpointing import (
+    find_dist_ckpt,
+    generate_model_state_dict,
+    load_state_dict_from_checkpoint,
+    save_config_and_state_dict,
+)
 from ..platforms import current_platform
 from ..utils import get_logger
 from .converter.convert_utils import MAX_SHARD_SIZE
@@ -44,10 +49,19 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
+def _validate_direct_hf_save(config):
+    if getattr(config, "mrope_yarn_enabled", False):
+        raise ValueError(
+            "Direct HF saving does not finalize MRoPE/YaRN metadata or legacy mscale weights. "
+            "Set save_hf_model=False, save a native MCA checkpoint, and export it with "
+            "llamafactory.model.model_utils.megatron_export."
+        )
+
+
 class VirtualModels:
     # a wrapper for model list to support virtual pipeline model parallel
     def __init__(self, cls, config: "McaModelConfig", *args, **kwargs):
-        self.models: List["McaGPTModel"] = []
+        self.models: list[McaGPTModel] = []
         self.config = config
         for i in range(config.virtual_pipeline_model_parallel_size or 1):
             if (config.virtual_pipeline_model_parallel_size or 1) > 1:
@@ -70,9 +84,7 @@ class VirtualModels:
                         elif ".base_layer" in k:
                             k = k.replace(".base_layer", "")
                         state_dict[k] = v
-                    self.models[0].base_model.model.save_pretrained(
-                        save_directory, state_dict={"model": state_dict}
-                    )
+                    self.models[0].base_model.model.save_pretrained(save_directory, state_dict={"model": state_dict})
                     self.models[0].unmerge_adapter()
                     return self.config.save_pretrained(save_directory)
                 for adapter_name, peft_config in self.models[0].peft_config.items():
@@ -86,10 +98,12 @@ class VirtualModels:
                     )
                 return self.config.save_pretrained(save_directory)
             return self.models[0].save_pretrained(save_directory, ckpt_format=ckpt_format)
-        state_dict = {f"model{i}": generate_model_state_dict(model, ckpt_format) for i, model in enumerate(self.models)}
+        state_dict = {
+            f"model{i}": generate_model_state_dict(model, ckpt_format) for i, model in enumerate(self.models)
+        }
         return self.models[0].save_pretrained(save_directory, state_dict=state_dict, ckpt_format=ckpt_format)
 
-    def load_state_dict(self, state_dict: Dict[str, torch.Tensor], strict: bool = True):
+    def load_state_dict(self, state_dict: dict[str, torch.Tensor], strict: bool = True):
         if len(self.models) == 1:
             if "model" in state_dict:
                 state_dict = state_dict["model"]
@@ -141,7 +155,7 @@ class VirtualModels:
         for model in self.models:
             yield from model.named_parameters(*args, **kwargs)
 
-    def estimate_tokens(self, input_dict: Dict[str, Union[torch.Tensor, Any]]):
+    def estimate_tokens(self, input_dict: dict[str, Union[torch.Tensor, Any]]):
         return self.models[0].estimate_tokens(input_dict)
 
     @functools.lru_cache(maxsize=4)
@@ -149,7 +163,7 @@ class VirtualModels:
         return sum(model.num_parameters(only_trainable, exclude_embeddings) for model in self.models)
 
     def floating_point_ops(
-        self, input_dict: Dict[str, Union[torch.Tensor, Any]], exclude_embeddings: bool = True
+        self, input_dict: dict[str, Union[torch.Tensor, Any]], exclude_embeddings: bool = True
     ) -> int:
         return 6 * self.estimate_tokens(input_dict) * self.num_parameters(exclude_embeddings=exclude_embeddings)
 
@@ -177,6 +191,7 @@ class VirtualModels:
     def save_pretrained_as_hf(
         self, save_directory: str, save_safetensors: bool = True, max_shard_size: Union[int, str] = MAX_SHARD_SIZE
     ):
+        _validate_direct_hf_save(self.config)
         os.makedirs(save_directory, exist_ok=True)
         converter = ModelConverter(self.config, to_hf=True)
         if not self.config.moe_parallel_folding:
@@ -206,7 +221,7 @@ class VirtualModels:
         else:
             for i in range(len(self.models)):
                 mpu.set_virtual_pipeline_model_parallel_rank(i)
-                state_dict["model%d" % i] = self.models[i].sharded_state_dict(prefix, *args, **kwargs)
+                state_dict[f"model{i}"] = self.models[i].sharded_state_dict(prefix, *args, **kwargs)
         return state_dict
 
 
@@ -220,9 +235,13 @@ class PretrainedModel(MegatronModule, ModuleUtilsMixin):
         args: "TrainingArguments" = None,
         use_cpu_initialization: bool = False,
         tokenizer: PreTrainedTokenizer = None,
+        config: "McaModelConfig" = None,
     ) -> "VirtualModels":
         load_start_time = time.time()
-        config = cls.config_class.from_pretrained(model_name_or_path, args)
+        if config is None:
+            config = cls.config_class.from_pretrained(model_name_or_path, args)
+        if args is not None and getattr(args, "save_hf_model", False):
+            _validate_direct_hf_save(config)
         config.use_cpu_initialization = use_cpu_initialization
 
         resized_vocab_size = None
@@ -285,11 +304,9 @@ class PretrainedModel(MegatronModule, ModuleUtilsMixin):
         state_dict = state_dict if state_dict is not None else {"model": generate_model_state_dict(self, ckpt_format)}
         save_config_and_state_dict(save_directory, self.config, state_dict, ckpt_format=ckpt_format)
 
-    def get_batch_on_this_cp_rank(self, batch: Dict[str, "torch.Tensor"], dim3_keys: List[str] = ["attention_mask"]):
+    def get_batch_on_this_cp_rank(self, batch: dict[str, "torch.Tensor"], dim3_keys: list[str] = ["attention_mask"]):
         # copy from Megatron-LM
-        """Slice batch input along sequence dimension into multiple chunks,
-        which are parallelized across GPUs in a context parallel group.
-        """
+        """Slice the sequence into chunks parallelized across the context-parallel group."""
         # With causal masking, each token only attends to its prior tokens. Simply split
         # sequence into CP chunks can result in severe load imbalance. That's to say, chunks
         # at the end of sequence have bigger workload than others. To address this issue,
@@ -323,9 +340,9 @@ class PretrainedModel(MegatronModule, ModuleUtilsMixin):
         return batch
 
     def enable_input_require_grads(self):
-        """
-        Enables the gradients for the input embeddings. This is useful for fine-tuning adapter weights while keeping
-        the model weights fixed.
+        """Enable input embedding gradients.
+
+        This supports adapter fine-tuning while keeping model weights fixed.
         """
 
         def make_inputs_require_grads(module, input, output):
@@ -412,7 +429,7 @@ class McaGPTModel(GPTModel, PretrainedModel):
             return None
 
     def compute_language_model_loss(self, labels: torch.Tensor, logits: torch.Tensor) -> torch.Tensor:
-        """Computes the language model loss (Cross entropy across vocabulary)
+        """Compute the language model loss (cross entropy across vocabulary).
 
         Args:
             labels (torch.Tensor): The labels of dimension [batch size, seq length]
@@ -421,7 +438,6 @@ class McaGPTModel(GPTModel, PretrainedModel):
         Returns:
             Tensor: Loss tensor of dimensions [batch size, sequence_length]
         """
-
         if self.config.cross_entropy_loss_fusion:
             if self.config.tensor_model_parallel_size == 1:
                 from ..parallel_functions.fused_cross_entropy import cross_entropy

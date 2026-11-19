@@ -547,18 +547,18 @@ pip install -r requirements/metrics.txt
 
 本仓库负责数据预处理、训练及 HF 权重导出。Serving 使用独立的 SGLang 环境，评测由 Harbor / OpenHands 调用 OpenAI-compatible API；两者不需要通过 LLaMA-Factory 启动。**导出的 HF 模型目录是交接点。**
 
-- **训练**：当前 512K 方案使用 LLaMA-Factory → ROLL mcore_adapter → Megatron-Core，8×H200，TP2 / PP2 / CP2 / EP4 / ETP1，BF16、FP32 梯度累积、75% optimizer CPU offload。依赖固定版本环境和 adapter 补丁，见 [512K 指南](examples/megatron/README_512k.md)。
+- **训练**：512K 参考方案使用 LLaMA-Factory → mcore_adapter → Megatron-Core，8×H200，TP2 / PP2 / CP2 / EP4 / ETP1，BF16、FP32 梯度累积、75% optimizer CPU offload。使用仓库内的 `src/mcore_adapter` 和固定版本环境，见 [512K 指南](examples/megatron/README_512k.md)。
 - **数据**：上游 `swe_data_process` 提供训练数据；本仓库按训练 tokenizer/template 预处理并校验 loss mask。换数据或 tokenizer 后重新生成缓存。
-- **导出**：将 Megatron 分片转成 HF 权重，保留训练使用的 MRoPE/YaRN 配置，校验 tokenizer、chat template 和权重分片。使用配置中的 `use_mca: true`（兼容 `USE_MCA=1`）选择 Megatron；`llamafactory-cli train` 成功结束后自动转换。输出默认是 `output_dir + "-hf"`，可用 `export_dir` 指定；精度和上下文来自训练配置及 checkpoint。普通训练、`save_hf_model: true` 或跳过最终保存时不重复转换。
+- **导出**：将 Megatron 分片转成 HF 权重，保留训练使用的 MRoPE/YaRN 配置，校验 tokenizer、chat template 和权重分片。使用配置中的 `use_mca: true`（兼容 `USE_MCA=1`）选择 Megatron；`llamafactory-cli train` 成功结束后自动转换。输出默认是 `output_dir + "-hf"`，可用 `export_dir` 指定；精度和上下文来自训练配置及 checkpoint。非 Megatron 训练、`save_hf_model: true`、跳过最终保存或 `pretrain_score_only: true` 时不执行自动转换。启用自定义 MRoPE/YaRN 时须使用 `save_hf_model: false`，以便导出时完成元数据修复及旧版权重补偿。手动导出复用同一份[包内实现](docs/long_context_sft.md#hf-export)。
 - **维护**：复用现有入口，实验差异放 YAML；不再按模型名或日期复制一套 prepare/run/export/serve/eval 脚本。
 
 训练复用已有入口：
 
 ```bash
-bash examples/megatron/512k/run.sh /path/to/train-env /path/to/ROLL-mcore-adapter /path/to/train.yaml
+bash examples/megatron/512k/run.sh /path/to/train-env /path/to/train.yaml
 ```
 
-数据使用 YAML 的 `dataset_dir`、`dataset` 和 `tokenized_path`；已有缓存直接加载，否则由原有数据处理流程生成。无需逐实验 prepare 或 export 脚本。
+命令末尾可追加 `key=value` 覆盖 YAML；`DRY_RUN=1` 仅检查配置和并行拓扑，`PREFLIGHT_ONLY=1` 检查环境、配置及本地输入文件。数据使用 YAML 的 `dataset_dir`、`dataset` 和 `tokenized_path`；修改模板、监督掩码、权重、长度或 packing 对齐后必须重建缓存。更多配置见[统一训练说明](docs/long_context_sft.md)。
 
 以下是当前已运行的 serving 配置：
 
@@ -709,9 +709,11 @@ llamafactory-cli export examples/merge_lora/qwen3_lora_sft.yaml
 
 ### Qwen3.5 512K 训练
 
+[统一长上下文训练说明：Qwen3.8、监督权重、训练前评分、诊断与 HF 导出](docs/long_context_sft.md)。
+
 单机 **8×H200** 上 Qwen3.5-35B-A3B-Base 全参数 SFT 的用法见 [512K 训练说明](examples/megatron/README_512k.md)和[脱敏示例](examples/megatron/qwen3_5_35b_a3b_base_512k_yarn.yaml)。使用 `USE_MCA=1` 的 **mcore_adapter / Megatron-Core**，而非 Megatron Bridge；采用 TP2 / PP2 / CP2 / EP4 / ETP1、YaRN factor 2、BF16 计算、FP32 梯度累积及 75% optimizer CPU offload。
 
-所需 workflow 代码、固定基线的 adapter 补丁与校验值、隔离环境安装方法及启动脚本均已随仓库提供，不能只安装原版依赖再复制 YAML。已观察到 optimizer step 完成，但不代表完整训练、HF 导出和评测均已验证。使用前替换路径并注册数据集；不要在已有任务占用的 GPU 上启动。
+所需 workflow、仓库内的 `src/mcore_adapter`、固定版本环境安装方法及统一启动脚本均已提供，adapter 也随 wheel 发布。原参考任务曾完成 optimizer step；本次集成的 CPU 检查结果及尚未执行的 GPU 验证见[验证范围](docs/long_context_sft.md#validation)。使用前替换路径并注册数据集，在空闲 GPU 上启动。
 
 ### LLaMA Board 可视化微调（由 [Gradio](https://github.com/gradio-app/gradio) 驱动）
 

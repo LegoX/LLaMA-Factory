@@ -50,8 +50,9 @@ from .trainer import CustomMcaTrainer
 
 
 if TYPE_CHECKING:
-    from mcore_adapter.training_args import Seq2SeqTrainingArguments as McaSeq2SeqTrainingArguments
     from transformers import TrainerCallback
+
+    from mcore_adapter.training_args import Seq2SeqTrainingArguments as McaSeq2SeqTrainingArguments
 
     from ...hparams import DataArguments, FinetuningArguments, ModelArguments
 
@@ -59,9 +60,18 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-def _data_collator_wrapper(data_collator: Any):
+def _data_collator_wrapper(data_collator: Any, trajectory_loss_weight: bool = False):
     @functools.wraps(data_collator)
     def wrapper(features: Sequence[dict[str, Any]]):
+        # Work on copies: cached examples may be reused across epochs.
+        features = deepcopy(features)
+        for feature in features:
+            feature.pop("score_metadata", None)
+        sample_weights = None
+        if trajectory_loss_weight:
+            sample_weights = [feature.pop("trajectory_loss_weight") for feature in features]
+            if any(isinstance(w, bool) or not isinstance(w, (int, float)) or not 0 < w <= 1 for w in sample_weights):
+                raise ValueError("trajectory loss weights must be finite numbers in (0, 1].")
         labels_key = [k for k in features[0].keys() if k.endswith("labels")]
         input_ids_key = [k for k in features[0].keys() if k.endswith("input_ids")]
         for feature in features:
@@ -78,7 +88,19 @@ def _data_collator_wrapper(data_collator: Any):
                     feature[k] = feature[k][:-1]
 
         # for qwen vl series model
-        tmp_features = data_collator(features)
+        try:
+            tmp_features = data_collator(features)
+        except StopIteration as exc:
+            # Accelerate's dataloader prefetch treats this exception as normal
+            # dataset exhaustion, silently discarding the rest of the epoch.
+            raise RuntimeError(
+                "MCA data collator raised StopIteration inside a batch; this is a data-processing error, "
+                "not the end of the dataset. Check media markers and multimodal inputs."
+            ) from exc
+        if sample_weights is not None:
+            weights = torch.tensor(sample_weights, dtype=torch.float32, device=tmp_features["labels"].device)
+            token_weights = tmp_features.get("loss_weights", (tmp_features["labels"] != IGNORE_INDEX).float())
+            tmp_features["loss_weights"] = weights[:, None] * token_weights
         tmp_features.pop("rope_deltas", None)
         position_ids = tmp_features.get("position_ids", None)
 
@@ -225,7 +247,8 @@ def run_sft(
     # TODO: FIX SequencePacking
     data_args.neat_packing = training_args.sequence_packing = data_args.neat_packing or training_args.sequence_packing
     data_args.packing = data_args.neat_packing or data_args.packing
-
+    if data_args.trajectory_loss_weight and data_args.packing:
+        raise ValueError("trajectory_loss_weight currently requires unpacked MCA SFT.")
     tokenizer_module = load_tokenizer(model_args)
     tokenizer = tokenizer_module["tokenizer"]
     template = get_template_and_fix_tokenizer(tokenizer, data_args)
@@ -236,7 +259,17 @@ def run_sft(
     data_args.cutoff_len -= 1
 
     _check_model_support(model_args)
-    model = AutoModel.from_pretrained(model_args.model_name_or_path, training_args)
+    model_config = None
+    if data_args.pretrain_score or data_args.trajectory_loss_weight:
+        # Resolve checkpoint defaults and overrides before validation or allocating weights.
+        model_config = AutoConfig.from_pretrained(model_args.model_name_or_path, training_args)
+        if data_args.trajectory_loss_weight and model_config.mtp_num_layers:
+            raise ValueError("trajectory_loss_weight requires mtp_num_layers=0 in the resolved model configuration.")
+    if data_args.pretrain_score:
+        from .scoring import validate_scoring_config
+
+        validate_scoring_config(model_config, training_args, data_args)
+    model = AutoModel.from_pretrained(model_args.model_name_or_path, training_args, config=model_config)
     collator_model = _build_meta_hf_model_for_collator(model_args)
 
     # optional freezing for qwen_vl series
@@ -250,13 +283,16 @@ def run_sft(
     data_collator = SFTDataCollatorWith4DAttentionMask(
         template=template,
         model=collator_model,
+        # Frozen vision modules need no dummy graph. In text-only batches,
+        # dummy images would reinterpret literal media tokens in code as images.
+        enable_dummy_media=not (finetuning_args.freeze_vision_tower and finetuning_args.freeze_multi_modal_projector),
         padding="max_length" if pad_to_max else "longest",
         max_length=data_args.cutoff_len if pad_to_max else None,
         pad_to_multiple_of=64,
         label_pad_token_id=IGNORE_INDEX,
         **tokenizer_module,
     )
-    data_collator = _data_collator_wrapper(data_collator)
+    data_collator = _data_collator_wrapper(data_collator, trajectory_loss_weight=data_args.trajectory_loss_weight)
 
     trainer = CustomMcaTrainer(
         model=model,
@@ -269,6 +305,13 @@ def run_sft(
 
     if "processor" in tokenizer_module and tokenizer_module["processor"] is not None:
         trainer.add_callback(SaveProcessorCallback(tokenizer_module["processor"]))
+
+    if data_args.pretrain_score:
+        from .scoring import score_training_dataset
+
+        score_training_dataset(trainer, model_args.model_name_or_path, data_args.pretrain_score_microbatches)
+        if data_args.pretrain_score_only:
+            return
 
     train_result = trainer.train(training_args.resume_from_checkpoint)
     if not training_args.benchmark_skip_final_save:

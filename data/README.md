@@ -30,7 +30,8 @@ Currently we support datasets in **alpaca** and **sharegpt** format. Allowed fil
     "audios": "the column name in the dataset containing the audios inputs. (default: None)",
     "chosen": "the column name in the dataset containing the chosen answers. (default: None)",
     "rejected": "the column name in the dataset containing the rejected answers. (default: None)",
-    "kto_tag": "the column name in the dataset containing the kto tags. (default: None)"
+    "kto_tag": "the column name in the dataset containing the kto tags. (default: None)",
+    "loss_weight": "the row-level trajectory weight column. (default: None; required with trajectory_loss_weight: true)"
   },
   "tags (optional, used for the sharegpt format)": {
     "role_tag": "the key in the message represents the identity. (default: from)",
@@ -43,6 +44,14 @@ Currently we support datasets in **alpaca** and **sharegpt** format. Allowed fil
   }
 }
 ```
+
+## Turn masks and loss weights (SFT)
+
+- With training option `turn_mask: true`, an assistant/function message's `turn_mask: true` keeps its text in context while removing its tokens, including closing EOS, from supervision. This supports ShareGPT and OpenAI message conversion and composes with `mask_history`.
+- ShareGPT assistant/function messages can carry numeric, finite, nonnegative `loss_weight`; `0` masks the turn. Message weights do not require the trajectory-weight option.
+- A row-level `loss_weight` requires `trajectory_loss_weight: true` and an explicit `columns.loss_weight` mapping in `dataset_info.json`. Values must be finite numbers in `(0, 1]`. This currently supports ordinary, unpacked MCA ShareGPT SFT; ranking/KTO and other backends are rejected.
+
+Turn and trajectory weights multiply the token CE numerator; the denominator counts valid supervised tokens. A uniform `0.5` weight therefore halves the CE gradient contribution. Megatron MoE auxiliary losses are not scaled by these weights. See the [supervision guide](../docs/long_context_sft.md#template-and-supervision) for a complete registration and row example, backend restrictions and fused-loss compatibility. Rebuild tokenized caches after changing these controls. `drop_long_sequences: true` drops samples whose complete encoded length exceeds `cutoff_len`; the default truncates them.
 
 ## Alpaca Format
 

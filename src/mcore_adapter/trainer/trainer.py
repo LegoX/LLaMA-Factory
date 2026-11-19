@@ -4,8 +4,9 @@ import random
 import sys
 import time
 import warnings
+from collections.abc import Iterator
 from functools import partial
-from typing import TYPE_CHECKING, Any, Iterator, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 import numpy as np
 import torch
@@ -215,11 +216,11 @@ class McaTrainer(Trainer):
     def disable_ddp_forward_pre_hook(
         self, model_chunks: Optional[list["DistributedDataParallel"]] = None, param_sync=True
     ):
-        """
-        disable the overlap param gather pre-hook of DDP for 3 reasons:
-            1. param sync: force sync model params. using before save ckpt.
-            2. eval mode
-            3. first training step before optimizer step
+        """Disable the overlap param gather pre-hook of DDP.
+
+        1. param sync: force sync model params. using before save ckpt.
+        2. eval mode
+        3. first training step before optimizer step
         """
         if not (self.args.use_distributed_optimizer and self.args.overlap_param_gather):
             return
@@ -343,17 +344,31 @@ class McaTrainer(Trainer):
         inputs = self._prepare_train_inputs(data_iterator)
         label_mask = (inputs["labels"] != IGNORE_INDEX).float()
         loss_weights = inputs.pop("loss_weights", None)
-        loss_mask = label_mask if loss_weights is None else loss_weights.float() * label_mask
-        if "loss_mask" not in inputs:
-            inputs["loss_mask"] = loss_mask
+        if loss_weights is not None and loss_weights.shape != label_mask.shape:
+            raise ValueError("loss_weights must align with shifted, padded and CP-sliced labels.")
+        if (
+            getattr(self.model.config, "mtp_num_layers", 0)
+            and loss_weights is not None
+            and torch.any(loss_weights[label_mask.bool()] != 1)
+        ):
+            raise ValueError("Non-unit loss weights require mtp_num_layers=0; MTP auxiliary loss is not weighted.")
+        inputs["loss_mask"] = label_mask
         output_tensor = model(**inputs)
-        return output_tensor, loss_mask
+        # A single deferred callback handles token/turn and trajectory weights.
+        # Hidden states on intermediate PP stages must remain untouched.
+        return output_tensor, label_mask if loss_weights is None else (label_mask, loss_weights)
 
     def _post_compute_loss(self, loss_mask, losses):
+        if isinstance(loss_mask, tuple):
+            loss_mask, weights = loss_mask
+            if losses.shape != weights.shape:
+                raise ValueError("Final-stage token losses must align with loss weights.")
+            # Keep the token denominator so weights scale CE gradients; MoE auxiliary losses are unaffected.
+            losses = losses * weights.float()
         loss_mask = loss_mask.view(-1).float()
         losses = torch.sum(losses.view(-1) * loss_mask)
         loss_mask = loss_mask.sum()
-        cp_size = self.model.config.context_parallel_size
+        cp_size = self.model.config.context_parallel_size or 1
         if cp_size > 1:
             # all-reduce loss for logging in context parallel
             loss_info = torch.cat([losses.view(1), loss_mask.view(1)])
@@ -363,12 +378,12 @@ class McaTrainer(Trainer):
             losses, loss_mask = loss_info[0], loss_info[1]
         loss = losses.clone()  # clone to make sure loss is not a view
         local_num_tokens = loss_mask.clone().detach()
-        if local_num_tokens == 0:
-            local_num_tokens += 1  # avoid divide by zero
+        # Keep zero counts for accumulation/global token normalization. Megatron clamps
+        # the denominator at division time, including in microbatch-normalized mode.
         if self.args.calculate_per_token_loss:
             metrics = {"loss": (loss.clone().detach(), local_num_tokens)}
         else:
-            metrics = {"loss": (loss / local_num_tokens).clone().detach()}
+            metrics = {"loss": (loss / local_num_tokens.clamp_min(1)).clone().detach()}
         if cp_size > 1:
             # Every CP rank reports the CP-summed token count, and Megatron's finalize_model_grads
             # all-reduces num_tokens over the DP x CP group, so the divisor is cp_size times too
@@ -389,19 +404,23 @@ class McaTrainer(Trainer):
             attention_mask = torch.ones_like(inputs["input_ids"])
         if torch.is_floating_point(attention_mask):
             # neat-packing segment ids can be promoted to float by collation; they must be non-negative integers
-            if attention_mask.dim() != 2 or bool((attention_mask < 0).any()) or not bool(torch.all(attention_mask == attention_mask.round())):
-                raise ValueError(f"sequence_packing expects 2D integer segment-id attention_mask, got {attention_mask.dtype} {tuple(attention_mask.shape)}")
+            if (
+                attention_mask.dim() != 2
+                or bool((attention_mask < 0).any())
+                or not bool(torch.all(attention_mask == attention_mask.round()))
+            ):
+                raise ValueError(
+                    f"sequence_packing expects 2D integer segment-id attention_mask, got {attention_mask.dtype} {tuple(attention_mask.shape)}"
+                )
             attention_mask = attention_mask.long()
         if getattr(self.model.config, "position_embedding_type", None) == "mrope" and attention_mask.size(0) == 1:
-            # LF records the trailing pad as its own packed segment; drop trailing segments without any label
-            attention_mask = attention_mask[:, : inputs["input_ids"].size(1)].clone()  # collator may right-pad the mask further
-            seg_ids, labels_row = attention_mask[0], inputs["labels"][0]
-            last_seg = int(seg_ids.max().item())
-            while last_seg > 0 and bool((labels_row[seg_ids == last_seg] == IGNORE_INDEX).all()):
-                seg_ids[seg_ids == last_seg] = 0
-                last_seg -= 1
-            # get_seqlens_in_batch counts trailing zeros as one more sequence; cut them off
-            attention_mask = attention_mask[:, : int((seg_ids > 0).sum().item())]
+            # Only mask value 0 denotes padding; real segments may have every label masked.
+            attention_mask = attention_mask[:, : inputs["input_ids"].size(1)]
+            non_padding = torch.nonzero(attention_mask[0] != 0, as_tuple=False).flatten()
+            if non_padding.numel() == 0:
+                raise ValueError("mrope sequence packing requires at least one non-padding token")
+            # get_seqlens_in_batch counts trailing padding as a sequence; exclude it.
+            attention_mask = attention_mask[:, : int(non_padding[-1].item()) + 1]
         seqlens, max_seq_len = get_seqlens_in_batch(attention_mask)
 
         cp_size = mpu.get_context_parallel_world_size()
@@ -424,13 +443,15 @@ class McaTrainer(Trainer):
             seq_lens = (seqlens[1:] - seqlens[:-1]).to(torch.long)
             mrope_position_ids = (
                 (torch.arange(total_len, device=seqlens.device) - torch.repeat_interleave(seq_starts, seq_lens))
-                .view(1, 1, -1).expand(3, 1, -1).contiguous()
+                .view(1, 1, -1)
+                .expand(3, 1, -1)
+                .contiguous()
             )
             inputs.pop("position_ids", None)  # [3, b, s] must not go through the flatten below
         packing_inputs = {
             k: v.view(1, -1, *v.shape[2:]) if v is not None and isinstance(v, Tensor) else v
             for k, v in inputs.items()
-            if k in self._language_input_names
+            if k in self._language_input_names or k == "loss_weights"
         }
         inputs.update(
             {
@@ -454,9 +475,7 @@ class McaTrainer(Trainer):
     def _get_step_iterator_and_seq_length(
         self, epoch_iterator: Iterator[dict[str, Tensor | Any]], standard_batch_size: Optional[int] = None
     ):
-        """
-        construct data iterator for gradient accumulation
-        """
+        """Construct data iterator for gradient accumulation."""
         step_inputs = []
         max_seq_length = 0
         total_seq_length = 0
@@ -491,9 +510,26 @@ class McaTrainer(Trainer):
 
         if not self.args.allow_variable_seq_lengths():
             step_inputs = [self._pad_batched_inputs(inputs, max_seq_length) for inputs in step_inputs]
+        # Count collated positions after fixed-length padding, before packing and CP partitioning.
+        self._step_input_tokens = sum(inputs[self.model.main_input_name].numel() for inputs in step_inputs)
         for inputs in step_inputs:
             self.current_flos += float(self.floating_point_ops(inputs))
         return iter(step_inputs), max_seq_length, total_seq_length
+
+    def _get_throughput_metrics(self, elapsed: float):
+        stats = torch.tensor([self._step_input_tokens, elapsed], dtype=torch.float64, device=self.args.device)
+        world_size = 1
+        if dist.is_initialized():
+            # Each model-parallel rank sees the same full batch; sum over DP only.
+            dist.all_reduce(stats[0], op=dist.ReduceOp.SUM, group=mpu.get_data_parallel_group())
+            dist.all_reduce(stats[1], op=dist.ReduceOp.MAX)
+            world_size = dist.get_world_size()
+        tokens, seconds = stats.tolist()
+        throughput = tokens / seconds
+        return {
+            "input_tokens_per_second": throughput,
+            "input_tokens_per_second_per_gpu": throughput / world_size,
+        }
 
     def _align_special_tokens(self, *args, **kwargs):
         pass
@@ -595,13 +631,16 @@ class McaTrainer(Trainer):
                 logger.warning(f"some metrics_tensors: {diff_keys} not set in self.metrics_keys: {self.metrics_keys}")
                 setattr(self, "warned_metrics", True)
             for key in self.metrics_keys:
-                metrics[key] = torch.stack(
-                    [
-                        m[key] if isinstance(m[key], torch.Tensor) else m[key][0] / m[key][1]  # per token loss
-                        for m in metrics_tensors
-                    ]
-                ).mean(0)
+                values = [m[key] for m in metrics_tensors]
+                if isinstance(values[0], torch.Tensor):
+                    metrics[key] = torch.stack(values).mean(0)
+                else:
+                    metrics[key] = torch.stack([torch.stack(value) for value in values]).sum(0)
             metrics = distributed_reduce(metrics, group=mpu.get_data_parallel_group(), op=dist.ReduceOp.AVG)
+            for key in self.metrics_keys:
+                if not isinstance(metrics_tensors[0][key], torch.Tensor):
+                    loss_sum, token_count = metrics[key]
+                    metrics[key] = loss_sum / torch.where(token_count > 0, token_count, 1)
         else:
             metrics = {k: torch.tensor(0.0, device=self.args.device, dtype=torch.float32) for k in self.metrics_keys}
         if mpu.get_pipeline_model_parallel_world_size() > 1:
@@ -866,6 +905,7 @@ class McaTrainer(Trainer):
         self.state.is_world_process_zero = self.is_world_process_zero()
 
         self._total_loss_scalar = 0.0
+        self._total_loss_tokens = 0.0
         self._globalstep_last_logged = self.state.global_step
 
         self.model.zero_grad()
@@ -923,8 +963,7 @@ class McaTrainer(Trainer):
         )
 
     def _get_train_cyclic_iterator(self, train_dataloader):
-        for x in train_dataloader:
-            yield x
+        yield from train_dataloader
 
     def _inner_training_loop(
         self, batch_size=None, args=None, resume_from_checkpoint=None, trial=None, ignore_keys_for_eval=None
@@ -1011,13 +1050,16 @@ class McaTrainer(Trainer):
                 self.state.global_step += 1
                 self.state.epoch = epoch + (step + 1 + steps_skipped) / steps_in_epoch
                 self.control = self.callback_handler.on_step_end(args, self.state, self.control)
-                token_per_sec_per_gpu = total_seq_length / (time.time() - tps_time)
+                elapsed = time.time() - tps_time
+                token_per_sec_per_gpu = total_seq_length / elapsed
                 tps_time = time.time()
                 logs = {
                     "skipped_iter": skipped_iter,
                     "num_zeros_in_grad": num_zeros_in_grad or 0,
                     "token_per_sec_per_gpu": token_per_sec_per_gpu,
                 }
+                if self.control.should_log:
+                    logs.update(self._get_throughput_metrics(elapsed))
                 if args.benchmark_log_peak_memory and torch.cuda.is_available():
                     peak_memory = torch.tensor(
                         [torch.cuda.max_memory_allocated(), torch.cuda.max_memory_reserved()],
@@ -1058,12 +1100,14 @@ class McaTrainer(Trainer):
                 break
 
         # add remaining tr_loss
+        tr_loss = self._reduce_loss(tr_loss)
         if self.args.calculate_per_token_loss:
-            tr_loss = tr_loss[0] / tr_loss[1]
-            tr_loss = tr_loss if tr_loss.isfinite() else torch.zeros_like(tr_loss)
-        self._total_loss_scalar += tr_loss.item()
-        effective_global_step = max(self.state.global_step, 0.001)  # Avoid ZeroDivisionError
-        train_loss = self._total_loss_scalar / effective_global_step
+            self._total_loss_scalar += tr_loss[0].item()
+            self._total_loss_tokens += tr_loss[1].item()
+            train_loss = self._total_loss_scalar / (self._total_loss_tokens or 1.0)
+        else:
+            self._total_loss_scalar += tr_loss.item()
+            train_loss = self._total_loss_scalar / max(self.state.global_step, 1)
         metrics = speed_metrics(
             "train",
             start_time,
@@ -1082,6 +1126,14 @@ class McaTrainer(Trainer):
         self.log(metrics)
         self.control = self.callback_handler.on_train_end(args, self.state, self.control)
         return TrainOutput(self.state.global_step, train_loss, metrics)
+
+    def _reduce_loss(self, loss):
+        loss = loss.clone().detach()
+        if mpu.is_pipeline_last_stage(ignore_virtual=True):
+            loss = distributed_reduce(loss, group=mpu.get_data_parallel_group(), op=dist.ReduceOp.AVG)
+        if mpu.get_pipeline_model_parallel_world_size() > 1:
+            loss = distributed_reduce(loss, group=mpu.get_pipeline_model_parallel_group())
+        return loss
 
     def _maybe_log_save_evaluate(
         self,
@@ -1124,20 +1176,21 @@ class McaTrainer(Trainer):
 
         if self.control.should_log and self.state.global_step > self._globalstep_last_logged:
             logs = {}
-            loss = tr_loss.clone().detach()
-            if mpu.is_pipeline_last_stage(ignore_virtual=True):
-                loss = distributed_reduce(loss, group=mpu.get_data_parallel_group(), op=torch.distributed.ReduceOp.AVG)
-            if mpu.get_pipeline_model_parallel_world_size() > 1:
-                loss = distributed_reduce(loss, group=mpu.get_pipeline_model_parallel_group())
+            loss = self._reduce_loss(tr_loss)
             if self.args.calculate_per_token_loss:
                 assert len(loss) == 2, f"Per token loss must be a tensor of [loss, num_tokens] but got {loss}"
-                loss = loss[0] / loss[1]
-            tr_loss_scalar = loss.item()
+                self._total_loss_scalar += loss[0].item()
+                self._total_loss_tokens += loss[1].item()
+                # Counts can be fractional after the DP average; replace only zero.
+                loss = loss[0] / torch.where(loss[1] > 0, loss[1], 1)
+            else:
+                self._total_loss_scalar += loss.item()
+                loss = loss / (self.state.global_step - self._globalstep_last_logged)
 
             # reset tr_loss to zero
             tr_loss -= tr_loss
 
-            logs["loss"] = round(tr_loss_scalar / (self.state.global_step - self._globalstep_last_logged), 4)
+            logs["loss"] = round(loss.item(), 4)
             if grad_norm is not None:
                 logs["grad_norm"] = grad_norm.detach().item() if isinstance(grad_norm, torch.Tensor) else grad_norm
             logs["learning_rate"] = self._get_learning_rate()
@@ -1187,7 +1240,6 @@ class McaTrainer(Trainer):
                 metrics.pop("loss", None)
                 logs.update(metrics)
             logs.update(other_logs)
-            self._total_loss_scalar += tr_loss_scalar
             self._globalstep_last_logged = self.state.global_step
             self.store_flos()
             self.log(logs)
@@ -1278,7 +1330,9 @@ class McaTrainer(Trainer):
     def save_model(self, output_dir: str = None, _internal_call: bool = False):
         output_dir = output_dir or self.args.output_dir
         if not (self.args.save_only_model and self.args.save_hf_model):
-            self.model.save_pretrained(output_dir, save_merged_model=self.args.save_merged_model, ckpt_format=self.args.ckpt_format)
+            self.model.save_pretrained(
+                output_dir, save_merged_model=self.args.save_merged_model, ckpt_format=self.args.ckpt_format
+            )
         if self.args.save_hf_model:
             self.model.save_pretrained_as_hf(output_dir)
         if self.args.should_save:

@@ -7,6 +7,7 @@ Make sure to execute these commands in the `LLaMA-Factory` directory.
 - [LoRA Fine-Tuning](#lora-fine-tuning)
 - [QLoRA Fine-Tuning](#qlora-fine-tuning)
 - [Full-Parameter Fine-Tuning](#full-parameter-fine-tuning)
+- [Long-Context MCA SFT](#long-context-mca-sft)
 - [Merging LoRA Adapters and Quantization](#merging-lora-adapters-and-quantization)
 - [Inferring LoRA Fine-Tuned Models](#inferring-lora-fine-tuned-models)
 - [Extras](#extras)
@@ -34,6 +35,22 @@ bash examples/train_lora/qwen3_lora_sft.sh
 ```
 
 ## Examples
+
+### Long-Context MCA SFT
+
+Use the [unified feature guide](../docs/long_context_sft.md) for environment setup, Qwen3.8 templates, turn masks, trajectory weights, pre-update scoring, diagnostics and HF export. Available configurations:
+
+- [Qwen3.5 512K YaRN](megatron/qwen3_5_35b_a3b_base_512k_yarn.yaml): single-node TP2/PP2/CP2/EP4.
+- [Qwen3.6 256K packed](megatron/qwen3_6_27b_256k_4node.yaml): four-node training with CP packing.
+- [Qwen3.8 256K supervision](megatron/qwen3_8_27b_256k.yaml): single-node TP4/PP2/CP1 with turn masks and trajectory weights.
+
+Replace model/data/output paths and register your dataset. All configurations use the same launcher; first check the merged configuration and parallel topology:
+
+```bash
+DRY_RUN=1 bash examples/megatron/512k/run.sh /path/to/env examples/megatron/qwen3_8_27b_256k.yaml
+```
+
+Use `PREFLIGHT_ONLY=1` to check installed dependencies and local input files, then omit the prefix to train. Append `key=value` overrides as needed. These checks do not establish long-sequence GPU memory fit; the guide records the validation boundary.
 
 ### LoRA Fine-Tuning
 

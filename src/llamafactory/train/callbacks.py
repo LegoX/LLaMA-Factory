@@ -272,7 +272,9 @@ class LogCallback(TrainerCallback):
             return
 
         self._timing(cur_steps=state.global_step)
+        # Preserve trainer metrics (e.g. grad_norm and MCA timings) alongside the UI fields.
         logs = dict(
+            state.log_history[-1],
             current_steps=self.cur_steps,
             total_steps=self.max_steps,
             loss=state.log_history[-1].get("loss"),

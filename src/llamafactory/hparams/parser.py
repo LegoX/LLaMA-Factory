@@ -15,7 +15,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import json
 import os
 import sys
 from pathlib import Path
@@ -71,14 +70,10 @@ def read_args(args: dict[str, Any] | list[str] | None = None) -> dict[str, Any] 
     if args is not None:
         return args
 
-    if len(sys.argv) > 1 and (sys.argv[1].endswith(".yaml") or sys.argv[1].endswith(".yml")):
+    if len(sys.argv) > 1 and Path(sys.argv[1]).suffix in {".yaml", ".yml", ".json"}:
         override_config = OmegaConf.from_cli(sys.argv[2:])
         dict_config = OmegaConf.load(Path(sys.argv[1]).absolute())
-        return OmegaConf.to_container(OmegaConf.merge(dict_config, override_config))
-    elif len(sys.argv) > 1 and sys.argv[1].endswith(".json"):
-        override_config = OmegaConf.from_cli(sys.argv[2:])
-        dict_config = OmegaConf.create(json.load(Path(sys.argv[1]).absolute()))
-        return OmegaConf.to_container(OmegaConf.merge(dict_config, override_config))
+        return OmegaConf.to_container(OmegaConf.merge(dict_config, override_config), resolve=True)
     else:
         return sys.argv[1:]
 
@@ -297,6 +292,17 @@ def get_train_args(args: dict[str, Any] | list[str] | None = None) -> _TRAIN_CLS
         _set_transformers_logging()
 
     # Check arguments
+    if data_args.pretrain_score and (
+        not finetuning_args.use_mca
+        or finetuning_args.stage != "sft"
+        or training_args.predict_with_generate
+        or training_args.resume_from_checkpoint
+    ):
+        raise ValueError("pretrain_score supports fresh MCA SFT only, without generation or checkpoint resume.")
+    if data_args.trajectory_loss_weight and (
+        not finetuning_args.use_mca or finetuning_args.stage != "sft" or training_args.predict_with_generate
+    ):
+        raise ValueError("trajectory_loss_weight is supported only for MCA SFT without generation.")
     if finetuning_args.stage != "sft":
         if training_args.predict_with_generate:
             raise ValueError("`predict_with_generate` cannot be set as True except SFT.")

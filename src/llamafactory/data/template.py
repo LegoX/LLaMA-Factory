@@ -73,6 +73,22 @@ class Template:
         response_ids = encoded_messages[-1]
         return prompt_ids, response_ids
 
+    def encode_generation(
+        self,
+        tokenizer: "PreTrainedTokenizer",
+        messages: list[dict[str, str]],
+        system: Optional[str] = None,
+        tools: Optional[str] = None,
+    ) -> list[int]:
+        r"""Encode a conversation ending in a user/tool message for generation."""
+        paired_messages = messages + [{"role": Role.ASSISTANT.value, "content": ""}]
+        prompt_ids, _ = self.encode_oneturn(tokenizer, paired_messages, system, tools)
+        return prompt_ids
+
+    def get_response_prefix(self) -> str:
+        r"""Return assistant text in the generation prompt to restore in chat responses."""
+        return ""
+
     def encode_multiturn(
         self,
         tokenizer: "PreTrainedTokenizer",
@@ -407,6 +423,13 @@ class Llama2Template(Template):
 class ReasoningTemplate(Template):
     r"""A template that add thought to assistant message."""
 
+    def _has_thought(self, content: str) -> bool:
+        return any(word.strip() in content for word in self.thought_words)
+
+    def _get_history_end(self, messages: list[dict[str, str]]) -> int:
+        """Return the exclusive end of history eligible for thought removal."""
+        return len(messages) - 2
+
     @override
     def encode_oneturn(
         self,
@@ -417,17 +440,14 @@ class ReasoningTemplate(Template):
     ) -> tuple[list[int], list[int]]:
         messages = deepcopy(messages)
         if not self.preserve_thinking:
-            for i in range(1, len(messages) - 2, 2):
+            for i in range(1, self._get_history_end(messages), 2):
                 messages[i]["content"] = self.remove_thought(messages[i]["content"])
 
         if self.enable_thinking is False:  # remove all cot
             messages[-1]["content"] = self.remove_thought(messages[-1]["content"])
 
         prompt_ids, response_ids = super().encode_oneturn(tokenizer, messages, system, tools)
-        if (
-            self.thought_words[0].strip() not in messages[-1]["content"]
-            and self.thought_words[1].strip() not in messages[-1]["content"]
-        ):  # add empty cot
+        if not self._has_thought(messages[-1]["content"]):  # add empty cot
             if not self.enable_thinking:  # do not compute loss
                 prompt_ids += self.get_thought_word_ids(tokenizer)
             else:  # do compute loss
@@ -449,27 +469,159 @@ class ReasoningTemplate(Template):
             for i in range(1, len(messages), 2):
                 messages[i]["content"] = self.remove_thought(messages[i]["content"])
 
-        if discarding_history_cot:
-            for i in range(1, len(messages) - 2, 2):  # preserve the last cot
-                messages[i]["content"] = self.remove_thought(messages[i]["content"])
+        history_end = self._get_history_end(messages) if discarding_history_cot else 0
+        for i in range(1, history_end, 2):
+            messages[i]["content"] = self.remove_thought(messages[i]["content"])
 
         encoded_messages = self._encode(tokenizer, messages, system, tools)
-        if discarding_history_cot:
-            turn_indices = [len(messages) - 2]
-        else:
-            turn_indices = range(0, len(messages), 2)
-
-        for i in turn_indices:
-            if (
-                self.thought_words[0].strip() not in messages[i + 1]["content"]
-                and self.thought_words[1].strip() not in messages[i + 1]["content"]
-            ):  # add empty cot
+        for i in range(history_end, len(messages), 2):
+            if not self._has_thought(messages[i + 1]["content"]):  # add empty cot
                 if not self.enable_thinking:  # do not compute loss
                     encoded_messages[i] += self.get_thought_word_ids(tokenizer)
                 else:  # do compute loss
                     encoded_messages[i + 1] = self.get_thought_word_ids(tokenizer) + encoded_messages[i + 1]
 
         return [(encoded_messages[i], encoded_messages[i + 1]) for i in range(0, len(encoded_messages), 2)]
+
+
+@dataclass
+class Qwen38ReasoningTemplate(ReasoningTemplate):
+    r"""Qwen3.8 template with reasoning-effort instructions and official system ordering."""
+
+    reasoning_effort: str = "xhigh"
+
+    @override
+    def _get_history_end(self, messages: list[dict[str, str]]) -> int:
+        # Tool responses belong to the current user query, including wrapped user messages.
+        for i in range(len(messages) - 1, -1, -1):
+            if messages[i]["role"] == Role.USER:
+                content = messages[i]["content"].strip()
+                if not (content.startswith("<tool_response>") and content.endswith("</tool_response>")):
+                    return i
+        return super()._get_history_end(messages)
+
+    @override
+    def encode_oneturn(
+        self,
+        tokenizer: "PreTrainedTokenizer",
+        messages: list[dict[str, str]],
+        system: Optional[str] = None,
+        tools: Optional[str] = None,
+    ) -> tuple[list[int], list[int]]:
+        pairs = self.encode_multiturn(
+            tokenizer, messages, system, tools, discarding_history_cot=not self.preserve_thinking
+        )
+        prompt_ids = [token for source, target in pairs[:-1] for token in source + target]
+        return prompt_ids + pairs[-1][0], pairs[-1][1]
+
+    @override
+    def encode_generation(
+        self,
+        tokenizer: "PreTrainedTokenizer",
+        messages: list[dict[str, str]],
+        system: Optional[str] = None,
+        tools: Optional[str] = None,
+    ) -> list[int]:
+        prompt_ids = super().encode_generation(tokenizer, messages, system, tools)
+        if self.enable_thinking is None:
+            # Training masks an empty thought for None; generation must leave it open.
+            prompt_ids = prompt_ids[: -len(self.get_thought_word_ids(tokenizer))]
+        return prompt_ids + tokenizer.encode(self.get_response_prefix(), add_special_tokens=False)
+
+    @override
+    def get_response_prefix(self) -> str:
+        return self.thought_words[0] if self.enable_thinking is not False else ""
+
+    @staticmethod
+    def _split_thought(content: str) -> tuple[Optional[str], str]:
+        content = content.strip()
+        if content.startswith("<think>"):
+            thought, separator, answer = content[len("<think>") :].partition("</think>")
+            if separator:
+                return thought.strip(), answer.strip()
+        return None, content
+
+    @override
+    def _has_thought(self, content: str) -> bool:
+        return self._split_thought(content)[0] is not None
+
+    @override
+    def remove_thought(self, content: str) -> str:
+        return self._split_thought(content)[1]
+
+    def _get_reasoning_instruction(self) -> str:
+        if self.enable_thinking is not True:
+            return ""
+
+        if self.reasoning_effort == "xhigh":
+            return (
+                "Reasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, "
+                "consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final "
+                "answer."
+            )
+        elif self.reasoning_effort == "medium":
+            return ""
+        elif self.reasoning_effort == "low":
+            return (
+                "Reasoning effort is set to low. Keep your thinking brief and focused, moving directly to the "
+                "conclusion without unnecessary elaboration."
+            )
+        else:
+            # Defensive validation for callers that configure the template without DataArguments.
+            raise ValueError(
+                f"Unexpected reasoning effort {self.reasoning_effort}. "
+                "Supported types are xhigh (default), medium, and low."
+            )
+
+    @override
+    def _encode(
+        self,
+        tokenizer: "PreTrainedTokenizer",
+        messages: list[dict[str, str]],
+        system: Optional[str],
+        tools: Optional[str],
+    ) -> list[list[int]]:
+        system = (system or self.default_system).strip()
+        reasoning_instruction = self._get_reasoning_instruction()
+        encoded_messages = []
+        for i, message in enumerate(messages):
+            elements = []
+            content = message["content"].strip()
+            if message["role"] in {Role.ASSISTANT, Role.FUNCTION}:
+                thought, answer = self._split_thought(content)
+                if thought is not None:
+                    content = self.thought_words[0] + thought + self.thought_words[1] + answer
+
+            if i == 0:
+                elements += self.format_prefix.apply()
+                system_parts = []
+                if reasoning_instruction:
+                    system_parts.append(reasoning_instruction)
+                if tools:
+                    tool_text = self.format_tools.apply(content=tools)[0].lstrip("\n")
+                    if tool_text:
+                        system_parts.append(tool_text)
+                if system:
+                    system_parts.append(system)
+                if system_parts:
+                    elements += self.format_system.apply(content="\n\n".join(system_parts))
+
+            if message["role"] == Role.USER:
+                elements += self.format_user.apply(content=content, idx=str(i // 2))
+            elif message["role"] == Role.ASSISTANT:
+                elements += self.format_assistant.apply(content=content)
+            elif message["role"] == Role.OBSERVATION:
+                elements += self.format_observation.apply(content=content)
+            elif message["role"] == Role.FUNCTION:
+                elements += self.format_function.apply(
+                    content=content, thought_words=self.thought_words, tool_call_words=self.tool_call_words
+                )
+            else:
+                raise NotImplementedError("Unexpected role: {}".format(message["role"]))
+
+            encoded_messages.append(self._convert_elements_to_ids(tokenizer, elements))
+
+        return encoded_messages
 
 
 @dataclass
@@ -643,7 +795,10 @@ def get_template_and_fix_tokenizer(tokenizer: "PreTrainedTokenizer", data_args: 
     if data_args.train_on_prompt and template.efficient_eos:
         raise ValueError("Current template does not support `train_on_prompt`.")
 
-    if data_args.tool_format is not None:
+    if isinstance(template, Qwen38ReasoningTemplate) and data_args.tool_format not in {None, "qwen3_8"}:
+        raise ValueError("Template `qwen3_8` uses its built-in tool format; remove the incompatible `tool_format`.")
+
+    if data_args.tool_format is not None and not isinstance(template, Qwen38ReasoningTemplate):
         logger.info_rank0(f"Using tool format: {data_args.tool_format}.")
         default_slots = ["{{content}}"] if template.efficient_eos else ["{{content}}", {"eos_token"}]
         template.format_function = FunctionFormatter(slots=default_slots, tool_format=data_args.tool_format)
@@ -655,12 +810,15 @@ def get_template_and_fix_tokenizer(tokenizer: "PreTrainedTokenizer", data_args: 
 
     if isinstance(template, ReasoningTemplate):
         logger.warning_rank0(
-            "You are using reasoning template, "
-            "please add `_nothink` suffix if the model is not a reasoning model. "
-            "e.g., qwen3_vl_nothink"
+            "You are using a reasoning template. For base models with a separate Instruct variant, "
+            "use the `_nothink` suffix to disable thinking; reasoning models do not need this suffix."
         )
         template.enable_thinking = data_args.enable_thinking
-        template.preserve_thinking = data_args.preserve_thinking
+        if isinstance(template, Qwen38ReasoningTemplate):
+            template.reasoning_effort = data_args.reasoning_effort
+            template.preserve_thinking = True if data_args.preserve_thinking is None else data_args.preserve_thinking
+        else:
+            template.preserve_thinking = bool(data_args.preserve_thinking)
 
     template.fix_special_tokens(tokenizer)
     template.fix_jinja_template(tokenizer)
@@ -2169,6 +2327,24 @@ register_template(
     replace_eos=True,
     mm_plugin=get_mm_plugin(name="qwen3_vl", image_token="<|image_pad|>", video_token="<|video_pad|>"),
     template_class=ReasoningTemplate,
+)
+
+
+register_template(
+    name="qwen3_8",
+    format_user=StringFormatter(slots=["<|im_start|>user\n{{content}}<|im_end|>\n<|im_start|>assistant\n"]),
+    format_assistant=StringFormatter(slots=["{{content}}<|im_end|>\n"]),
+    format_system=StringFormatter(slots=["<|im_start|>system\n{{content}}<|im_end|>\n"]),
+    format_function=FunctionFormatter(slots=["{{content}}<|im_end|>\n"], tool_format="qwen3_8"),
+    format_observation=StringFormatter(
+        slots=["<|im_start|>user\n<tool_response>\n{{content}}\n</tool_response><|im_end|>\n<|im_start|>assistant\n"]
+    ),
+    format_tools=ToolFormatter(tool_format="qwen3_8"),
+    stop_words=["<|im_end|>"],
+    replace_eos=True,
+    preserve_thinking=True,
+    mm_plugin=get_mm_plugin(name="qwen3_vl", image_token="<|image_pad|>", video_token="<|video_pad|>"),
+    template_class=Qwen38ReasoningTemplate,
 )
 
 

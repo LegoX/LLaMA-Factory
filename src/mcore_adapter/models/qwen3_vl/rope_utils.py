@@ -1,4 +1,4 @@
-from typing import Optional, Tuple
+from typing import Optional
 
 import torch
 from megatron.core import parallel_state
@@ -17,8 +17,9 @@ from .config_qwen3_vl import Qwen3VLConfig
 
 class Qwen3VLMultimodalRotaryEmbedding(nn.Module):
     """Rotary Embedding for language model.
+
     Based on https://github.com/lostkevin/Pai-Megatron-Patch/blob/
-    11b44c3cfe95defb006641b085f8657702f25f10/megatron_patch/model/qwen3_vl/rotary_pos_embedding.py
+    11b44c3cfe95defb006641b085f8657702f25f10/megatron_patch/model/qwen3_vl/rotary_pos_embedding.py.
 
     Args:
         kv_channels (int): Projection weights dimension in multi-head attention. Obtained
@@ -69,9 +70,9 @@ class Qwen3VLMultimodalRotaryEmbedding(nn.Module):
                 yarn_original_max_position_embeddings,
                 yarn_correction_range_round_to_int,
             )
-            inv_freq_mask = 1.0 - _yarn_linear_ramp_mask(
-                low, high, dim // 2, device=inv_freq_extra.device
-            ).to(dtype=torch.float32)
+            inv_freq_mask = 1.0 - _yarn_linear_ramp_mask(low, high, dim // 2, device=inv_freq_extra.device).to(
+                dtype=torch.float32
+            )
             self.inv_freq = inv_freq_inter * (1 - inv_freq_mask) + inv_freq_extra * inv_freq_mask
         else:
             self.inv_freq = inv_freq_extra
@@ -86,12 +87,15 @@ class Qwen3VLMultimodalRotaryEmbedding(nn.Module):
 
     def apply_interleaved_mrope(self, freqs, mrope_section):
         """Apply interleaved MRoPE to 3D rotary embeddings.
+
         Reorganizes frequency layout from chunked [TTT...HHH...WWW] to
         interleaved [THTHWHTHW...TT], preserving frequency continuity.
-        args:
-            x: (3, bs, seq_len, head_dim // 2)
+
+        Args:
+            freqs: (3, bs, seq_len, head_dim // 2)
             mrope_section: (3,)
-        returns:
+
+        Returns:
             x_t: (bs, seq_len, head_dim // 2)
         """
         freqs_t = freqs[0]  # just overwrite the first dimension T
@@ -111,6 +115,7 @@ class Qwen3VLMultimodalRotaryEmbedding(nn.Module):
 
         Args:
             position_ids (torch.Tensor): A position_id tensor with shape [3, batchsize, seqlens]
+            cp_group: Optional context-parallel process group.
             mrope_section (list[int]): Multimodal rope section is for channel dimension of temporal,
                 height and width in rope calculation.
 
@@ -162,13 +167,14 @@ def _apply_rotary_pos_emb_thd_absolute(
         cu_seqlens: Cumulative sequence lengths (unused, kept for API compat).
         freqs: Rotary frequencies of shape ``[total_tokens, 1, 1, 2*rot_dim]``.
         rotary_interleaved: Whether to use interleaved layout.
+        mscale: Scaling applied to rotary coordinates.
 
     Returns:
         Tensor of shape ``[total_tokens, num_heads, head_dim]``.
     """
-    return _apply_rotary_pos_emb_bshd(
-        t[:, None], freqs, rotary_interleaved=rotary_interleaved, mscale=mscale
-    ).squeeze(1)
+    return _apply_rotary_pos_emb_bshd(t[:, None], freqs, rotary_interleaved=rotary_interleaved, mscale=mscale).squeeze(
+        1
+    )
 
 
 def apply_rotary_pos_emb_absolute(
@@ -197,14 +203,22 @@ def apply_rotary_pos_emb_absolute(
         cu_seqlens: Cumulative sequence lengths for THD format (or ``None``).
         **kwargs: Ignored (absorbs ``mscale``, ``cp_group`` from caller).
     """
-    # YaRN mscale scales cos/sin of the rotary dims only, as in the standard Megatron path and HF;
-    # scaling the whole result would also scale the pass-through dims under partial rotary.
     mscale = kwargs.get("mscale", 1.0) if getattr(config, "mrope_yarn_enabled", False) else 1.0
+    mode = getattr(config, "mrope_yarn_mscale_mode", "rotary_dimensions")
+    if mode not in {"rotary_dimensions", "all_dimensions"}:
+        raise ValueError(f"Unknown YaRN mscale mode: {mode}")
+    # Standard YaRN scales rotary coordinates only. Legacy checkpoints must opt in.
+    rotary_scale = mscale if mode == "rotary_dimensions" else 1.0
     if cu_seqlens is None:
-        return _apply_rotary_pos_emb_bshd(t, freqs, rotary_interleaved=config.rotary_interleaved, mscale=mscale)
-    return _apply_rotary_pos_emb_thd_absolute(
-        t, cu_seqlens, freqs, rotary_interleaved=config.rotary_interleaved, mscale=mscale
-    )
+        result = _apply_rotary_pos_emb_bshd(
+            t, freqs, rotary_interleaved=config.rotary_interleaved, mscale=rotary_scale
+        )
+    else:
+        result = _apply_rotary_pos_emb_thd_absolute(
+            t, cu_seqlens, freqs, rotary_interleaved=config.rotary_interleaved, mscale=rotary_scale
+        )
+    return result if mode == "rotary_dimensions" else result * mscale
+
 
 # copy from transformers==4.57.0
 def get_rope_index(
@@ -212,9 +226,8 @@ def get_rope_index(
     input_ids: torch.LongTensor,
     image_grid_thw: Optional[torch.LongTensor] = None,
     video_grid_thw: Optional[torch.LongTensor] = None,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Different from the original implementation, Qwen3VL use timestamps rather than absolute time position ids."""
-
     # Since we use timestamps to separate videos, like <t1> <vision_start> <frame1> <vision_end> <t2> <vision_start> <frame2> <vision_end>, the video_grid_thw should also be split
     if video_grid_thw is not None:
         video_grid_thw = torch.repeat_interleave(video_grid_thw, video_grid_thw[:, 0], dim=0)

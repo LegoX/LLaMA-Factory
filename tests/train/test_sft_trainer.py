@@ -13,16 +13,17 @@
 # limitations under the License.
 
 import os
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
 import torch
-from transformers import DataCollatorWithPadding
+from transformers import DataCollatorWithPadding, LlamaConfig, LlamaForCausalLM
 
 from llamafactory.data import get_dataset, get_template_and_fix_tokenizer
 from llamafactory.extras.constants import IGNORE_INDEX
-from llamafactory.hparams import get_train_args
+from llamafactory.hparams import FinetuningArguments, TrainingArguments, get_train_args
 from llamafactory.model import load_model, load_tokenizer
 from llamafactory.train.sft.trainer import CustomSeq2SeqTrainer, _compute_weighted_loss
 
@@ -83,7 +84,7 @@ def test_compute_weighted_loss():
         reduction="none",
     )
     expected_weights = torch.tensor([1.0, 0.5, 0.0])
-    expected = (per_token_loss * expected_weights).sum() / expected_weights.sum()
+    expected = (per_token_loss * expected_weights).sum() / (labels[:, 1:] != IGNORE_INDEX).sum()
     assert torch.allclose(loss, expected)
 
 
@@ -115,3 +116,70 @@ def test_shuffle(disable_shuffling: bool):
         assert data_collator.verbose_list[0]["input_ids"] == dataset_module["train_dataset"][0]["input_ids"]
     else:
         assert data_collator.verbose_list[0]["input_ids"] != dataset_module["train_dataset"][0]["input_ids"]
+
+
+def test_uniform_weight_scales_hf_loss_gradient():
+    labels = torch.tensor([[-100, 1, 2]])
+    logits = torch.randn(1, 3, 4, requires_grad=True)
+    plain = _compute_weighted_loss({"logits": logits}, labels, torch.ones_like(labels).float())
+    plain.backward()
+    expected = logits.grad.clone() * 0.25
+    logits.grad = None
+    weighted = _compute_weighted_loss({"logits": logits}, labels, torch.full_like(labels, 0.25, dtype=torch.float32))
+    weighted.backward()
+    torch.testing.assert_close(logits.grad, expected)
+
+
+@pytest.mark.parametrize("processor", [None, object()])
+@pytest.mark.parametrize("second_labels", [[-100, 3, 4, 5], [-100, -100, -100, 5], [-100] * 4])
+@pytest.mark.parametrize("configured_accumulation", [2, 4])
+def test_weighted_trainer_gradient_accumulation(tmp_path, processor, second_labels, configured_accumulation):
+    model = LlamaForCausalLM(
+        LlamaConfig(
+            vocab_size=16,
+            hidden_size=8,
+            intermediate_size=16,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            num_key_value_heads=2,
+            attention_dropout=0,
+            use_cache=False,
+        )
+    )
+    trainer = CustomSeq2SeqTrainer(
+        model=model,
+        args=TrainingArguments(
+            output_dir=str(tmp_path),
+            use_cpu=True,
+            report_to="none",
+            gradient_accumulation_steps=configured_accumulation,
+        ),
+        finetuning_args=FinetuningArguments(finetuning_type="full"),
+        processor=processor,
+        tokenizer=None,
+    )
+    trainer.create_optimizer()
+    # Also exercise a final, partial accumulation window (2 actual vs 4 configured).
+    trainer.current_gradient_accumulation_steps = 2
+    batches = [
+        dict(
+            input_ids=torch.tensor([[2, 3, 4, 5]]),
+            labels=torch.tensor([labels]),
+            loss_weights=torch.tensor([[0.0, 1.0, 0.5, 0.25]]),
+        )
+        for labels in [[-100, 3, 4, 5], second_labels]
+    ]
+    batches, count = trainer.get_batch_samples(iter(batches), len(batches), torch.device("cpu"))
+    for batch in batches:
+        trainer.training_step(model, deepcopy(batch), num_items_in_batch=count)
+    accumulated = {name: param.grad.clone() for name, param in model.named_parameters()}
+    model.zero_grad()
+    # Independent reference: weighted token sum / valid tokens, averaged over microbatches.
+    for batch in batches:
+        logits = model(input_ids=batch["input_ids"]).logits[:, :-1].float()
+        labels = batch["labels"][:, 1:]
+        ce = torch.nn.functional.cross_entropy(logits.flatten(0, 1), labels.flatten(), reduction="none")
+        loss = (ce * batch["loss_weights"][:, 1:].flatten()).sum() / (labels != -100).sum().clamp_min(1)
+        (loss / len(batches)).backward()
+    for name, param in model.named_parameters():
+        torch.testing.assert_close(accumulated[name], param.grad)

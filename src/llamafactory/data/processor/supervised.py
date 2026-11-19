@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
+import math
 import os
 from collections import defaultdict
 from dataclasses import asdict, dataclass
@@ -36,7 +38,9 @@ def _get_loss_weight(message: dict[str, Any], default: float = 1.0) -> float:
     if isinstance(weight, bool) or not isinstance(weight, (int, float)):
         return default
 
-    return max(float(weight), 0.0)
+    if not math.isfinite(weight) or weight < 0:
+        raise ValueError("Message loss_weight must be finite and nonnegative.")
+    return float(weight)
 
 
 @dataclass
@@ -67,7 +71,8 @@ class SupervisedDatasetProcessor(DatasetProcessor):
         images: list["ImageInput"],
         videos: list["VideoInput"],
         audios: list["AudioInput"],
-    ) -> tuple[list[int], list[int], list[float]]:
+        score_metadata: Optional[dict] = None,
+    ) -> tuple[list[int], list[int], list[float], int]:
         messages = self.template.mm_plugin.process_messages(prompt + response, images, videos, audios, self.processor)
         input_ids, labels = self.template.mm_plugin.process_token_ids(
             [], [], images, videos, audios, self.tokenizer, self.processor
@@ -77,10 +82,45 @@ class SupervisedDatasetProcessor(DatasetProcessor):
         encoded_pairs = self.template.encode_multiturn(self.tokenizer, messages, system, tools, discarding_history_cot)
         response_loss_weights = [_get_loss_weight(messages[i + 1]) for i in range(0, len(messages), 2)]
         total_length = len(input_ids) + (1 if self.template.efficient_eos else 0)
+        full_length = total_length + sum(len(source_ids) + len(target_ids) for source_ids, target_ids in encoded_pairs)
+        if score_metadata is not None:
+            if self.template.efficient_eos or images or videos or audios:
+                raise ValueError(
+                    "pretrain_score currently requires text-only data and a template without efficient_eos."
+                )
+            score_metadata.update(
+                full_length=full_length,
+                turns=[
+                    {
+                        "turn_id": idx,
+                        "start": None,
+                        "end": None,
+                        "original_target_tokens": len(target),
+                        "target_truncated": True,
+                        "context_truncated": False,
+                    }
+                    for idx, (_, target) in enumerate(encoded_pairs)
+                ],
+            )
+        if score_metadata is not None and any(weight != 1.0 for weight in response_loss_weights):
+            raise ValueError("pretrain_score requires unweighted assistant turns.")
+        context_truncated = False
+        turn_masks = []
+        if self.data_args.turn_mask:
+            turn_masks = [message.get("turn_mask", False) for message in messages[1::2]]
+            if len(turn_masks) != len(encoded_pairs):
+                raise ValueError(
+                    f"The number of assistant turns ({len(turn_masks)}) does not match the number of encoded turns "
+                    f"({len(encoded_pairs)})."
+                )
+
         if self.data_args.mask_history:
             encoded_pairs = encoded_pairs[::-1]  # high priority for last turns
             response_loss_weights = response_loss_weights[::-1]
+            if self.data_args.turn_mask:
+                turn_masks = turn_masks[::-1]
 
+        final_eos_weight = 0.0
         for turn_idx, (source_ids, target_ids) in enumerate(encoded_pairs):
             if total_length >= self.data_args.cutoff_len:
                 break
@@ -88,27 +128,49 @@ class SupervisedDatasetProcessor(DatasetProcessor):
             source_len, target_len = infer_seqlen(
                 len(source_ids), len(target_ids), self.data_args.cutoff_len - total_length
             )
+            if score_metadata is not None:
+                context_truncated = context_truncated or source_len < len(source_ids)
+                score_metadata["turns"][turn_idx].update(
+                    start=len(input_ids) + source_len,
+                    end=len(input_ids) + source_len + target_len,
+                    target_truncated=target_len < len(target_ids),
+                    context_truncated=context_truncated,
+                )
+                context_truncated = context_truncated or target_len < len(target_ids)
             source_ids = source_ids[:source_len]
             target_ids = target_ids[:target_len]
             total_length += source_len + target_len
 
             if self.data_args.train_on_prompt:
                 source_label = source_ids
-            elif self.template.efficient_eos and turn_idx != 0:
-                source_label = [self.tokenizer.eos_token_id] + [IGNORE_INDEX] * (source_len - 1)
+            elif self.template.efficient_eos and turn_idx != 0 and source_len:
+                # This EOS closes the preceding assistant turn, so honor its mask too.
+                previous_weight = response_loss_weights[turn_idx - 1]
+                previous_masked = self.data_args.mask_history or (
+                    self.data_args.turn_mask and turn_masks[turn_idx - 1]
+                )
+                eos_label = (
+                    self.tokenizer.eos_token_id if previous_weight > 0 and not previous_masked else IGNORE_INDEX
+                )
+                source_label = [eos_label] + [IGNORE_INDEX] * (source_len - 1)
             else:
                 source_label = [IGNORE_INDEX] * source_len
 
-            target_weight = response_loss_weights[turn_idx] if turn_idx < len(response_loss_weights) else 1.0
-            if self.data_args.mask_history and turn_idx != 0:  # train on the last turn only
-                target_label = [IGNORE_INDEX] * target_len
-            elif target_weight == 0.0:
-                target_label = [IGNORE_INDEX] * target_len
-            else:
-                target_label = target_ids
+            target_weight = response_loss_weights[turn_idx]
+            target_masked = (
+                (self.data_args.mask_history and turn_idx != 0)
+                or (self.data_args.turn_mask and turn_masks[turn_idx])
+                or target_weight == 0.0
+            )
+            target_label = [IGNORE_INDEX] * target_len if target_masked else target_ids
 
             source_loss_weight = [1.0 if label != IGNORE_INDEX else 0.0 for label in source_label]
             target_loss_weight = [target_weight if label != IGNORE_INDEX else 0.0 for label in target_label]
+            if self.template.efficient_eos and turn_idx and source_len and not self.data_args.train_on_prompt:
+                source_loss_weight[0] = previous_weight if source_label[0] != IGNORE_INDEX else 0.0
+            if turn_idx == 0 or not self.data_args.mask_history:
+                # An empty, unmasked answer still supervises its closing EOS.
+                final_eos_weight = 0.0 if target_masked else target_weight
 
             if self.data_args.mask_history:  # reversed sequences
                 input_ids = source_ids + target_ids + input_ids
@@ -120,12 +182,12 @@ class SupervisedDatasetProcessor(DatasetProcessor):
                 loss_weights += source_loss_weight + target_loss_weight
 
         if self.template.efficient_eos:
-            eos_weight = response_loss_weights[0 if self.data_args.mask_history else -1] if response_loss_weights else 1.0
+            eos_weight = final_eos_weight
             input_ids += [self.tokenizer.eos_token_id]
             labels += [self.tokenizer.eos_token_id if eos_weight > 0.0 else IGNORE_INDEX]
             loss_weights += [eos_weight if labels[-1] != IGNORE_INDEX else 0.0]
 
-        return input_ids, labels, loss_weights
+        return input_ids, labels, loss_weights, full_length
 
     def preprocess_dataset(self, examples: dict[str, list[Any]]) -> dict[str, list[Any]]:
         # build inputs with format `<bos> X Y <eos>` and labels with format `<ignore> ... <ignore> Y <eos>`
@@ -133,12 +195,18 @@ class SupervisedDatasetProcessor(DatasetProcessor):
         model_inputs = defaultdict(list)
         for i in range(len(examples["_prompt"])):
             if len(examples["_prompt"][i]) % 2 != 1 or len(examples["_response"][i]) != 1:
+                if self.data_args.pretrain_score:
+                    raise ValueError(
+                        f"Cannot score invalid SFT example: {examples['_score_source'][i]}. "
+                        "Fix its conversation format before scoring."
+                    )
                 logger.warning_rank0(
                     "Dropped invalid example: {}".format(examples["_prompt"][i] + examples["_response"][i])
                 )
                 continue
 
-            input_ids, labels, loss_weights = self._encode_data_example(
+            score_metadata = {} if self.data_args.pretrain_score else None
+            input_ids, labels, loss_weights, full_length = self._encode_data_example(
                 prompt=examples["_prompt"][i],
                 response=examples["_response"][i],
                 system=examples["_system"][i],
@@ -146,11 +214,24 @@ class SupervisedDatasetProcessor(DatasetProcessor):
                 images=examples["_images"][i] or [],
                 videos=examples["_videos"][i] or [],
                 audios=examples["_audios"][i] or [],
+                score_metadata=score_metadata,
             )
+            if self.data_args.drop_long_sequences and full_length > self.data_args.cutoff_len:
+                logger.warning_rank0(
+                    f"Dropped lengthy example with full length {full_length} > {self.data_args.cutoff_len}."
+                )
+                continue
+
             model_inputs["input_ids"].append(input_ids)
             model_inputs["attention_mask"].append([1] * len(input_ids))
             model_inputs["labels"].append(labels)
             model_inputs["loss_weights"].append(loss_weights)
+            if score_metadata is not None:
+                score_metadata.update(json.loads(examples["_score_source"][i]))
+                score_metadata.update(retained_length=len(input_ids), truncated=full_length > len(input_ids))
+                model_inputs["score_metadata"].append(json.dumps(score_metadata, ensure_ascii=False))
+            if self.data_args.trajectory_loss_weight:
+                model_inputs["trajectory_loss_weight"].append(examples["_loss_weight"][i])
             model_inputs["images"].append(examples["_images"][i])
             model_inputs["videos"].append(examples["_videos"][i])
             model_inputs["audios"].append(examples["_audios"][i])
@@ -183,7 +264,7 @@ class PackedSupervisedDatasetProcessor(SupervisedDatasetProcessor):
                 )
                 continue
 
-            input_ids, labels, loss_weights = self._encode_data_example(
+            input_ids, labels, loss_weights, full_length = self._encode_data_example(
                 prompt=examples["_prompt"][i],
                 response=examples["_response"][i],
                 system=examples["_system"][i],
@@ -192,6 +273,9 @@ class PackedSupervisedDatasetProcessor(SupervisedDatasetProcessor):
                 videos=examples["_videos"][i] or [],
                 audios=examples["_audios"][i] or [],
             )
+            if self.data_args.drop_long_sequences and full_length > self.data_args.cutoff_len:
+                continue
+
             # Optional: pad each packed sub-sequence to a multiple of LF_PACK_SUBSEQ_ALIGN (e.g. 2 * CP size),
             # required by Megatron THD packing with context parallelism. Padding tokens are ignored by the loss.
             pack_align = int(os.environ.get("LF_PACK_SUBSEQ_ALIGN", "0"))

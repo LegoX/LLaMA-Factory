@@ -56,16 +56,28 @@ def _export_after_training(config, node_rank):
         return
     if not config.get("do_train", False) or config.get("save_hf_model", False):
         return
-    if config.get("benchmark_skip_final_save", False):
+    if config.get("benchmark_skip_final_save", False) or config.get("pretrain_score_only", False):
         return
-    converter = Path(__file__).resolve().parents[2] / "scripts" / "megatron_merge.py"
     env = deepcopy(os.environ)
     env["CUDA_VISIBLE_DEVICES"] = env.get("CUDA_VISIBLE_DEVICES", "0").split(",")[0]
     from .extras.misc import find_available_port
 
+    # Conversion initializes its own one-process distributed group.
+    for name in ("RANK", "LOCAL_RANK", "WORLD_SIZE", "LOCAL_WORLD_SIZE", "GROUP_RANK", "ROLE_RANK", "ROLE_WORLD_SIZE"):
+        env.pop(name, None)
     env["MASTER_ADDR"] = "127.0.0.1"
     env["MASTER_PORT"] = str(find_available_port())
-    subprocess.run([sys.executable, str(converter), "--training_config", json.dumps(config)], env=env, check=True)
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "llamafactory.model.model_utils.megatron_export",
+            "--training_config",
+            json.dumps(config),
+        ],
+        env=env,
+        check=True,
+    )
 
 
 def launch():
@@ -126,46 +138,35 @@ def launch():
             if min_nnodes is not None and max_nnodes is not None:
                 rdzv_nnodes = f"{min_nnodes}:{max_nnodes}"
 
-            process = subprocess.run(
-                (
-                    "torchrun --nnodes {rdzv_nnodes} --nproc-per-node {nproc_per_node} "
-                    "--rdzv-id {rdzv_id} --rdzv-backend c10d --rdzv-endpoint {master_addr}:{master_port} "
-                    "--max-restarts {max_restarts} {file_name} {args}"
-                )
-                .format(
-                    rdzv_nnodes=rdzv_nnodes,
-                    nproc_per_node=nproc_per_node,
-                    rdzv_id=rdzv_id,
-                    master_addr=master_addr,
-                    master_port=master_port,
-                    max_restarts=max_restarts,
-                    file_name=__file__,
-                    args=" ".join(sys.argv[1:]),
-                )
-                .split(),
-                env=env,
-                check=True,
-            )
+            distributed_args = [
+                "--nnodes",
+                rdzv_nnodes,
+                "--rdzv-id",
+                rdzv_id,
+                "--rdzv-backend",
+                "c10d",
+                "--rdzv-endpoint",
+                f"{master_addr}:{master_port}",
+                "--max-restarts",
+                max_restarts,
+            ]
         else:
-            # NOTE: DO NOT USE shell=True to avoid security risk
-            process = subprocess.run(
-                (
-                    "torchrun --nnodes {nnodes} --node_rank {node_rank} --nproc_per_node {nproc_per_node} "
-                    "--master_addr {master_addr} --master_port {master_port} {file_name} {args}"
-                )
-                .format(
-                    nnodes=nnodes,
-                    node_rank=node_rank,
-                    nproc_per_node=nproc_per_node,
-                    master_addr=master_addr,
-                    master_port=master_port,
-                    file_name=__file__,
-                    args=" ".join(sys.argv[1:]),
-                )
-                .split(),
-                env=env,
-                check=True,
-            )
+            distributed_args = [
+                "--nnodes",
+                nnodes,
+                "--node-rank",
+                node_rank,
+                "--master-addr",
+                master_addr,
+                "--master-port",
+                master_port,
+            ]
+
+        process = subprocess.run(
+            ["torchrun", "--nproc-per-node", nproc_per_node, *distributed_args, __file__, *sys.argv[1:]],
+            env=env,
+            check=True,
+        )
 
         _export_after_training(training_config, int(node_rank))
         sys.exit(process.returncode)

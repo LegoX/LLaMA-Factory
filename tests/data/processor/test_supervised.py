@@ -23,7 +23,7 @@ from llamafactory.data import get_template_and_fix_tokenizer
 from llamafactory.data.processor.supervised import SupervisedDatasetProcessor
 from llamafactory.extras.constants import IGNORE_INDEX
 from llamafactory.extras.packages import is_transformers_version_greater_than
-from llamafactory.hparams import get_infer_args
+from llamafactory.hparams import DataArguments, get_infer_args
 from llamafactory.model import load_tokenizer
 from llamafactory.train.test_utils import load_dataset_module
 
@@ -45,6 +45,53 @@ TRAIN_ARGS = {
     "overwrite_output_dir": True,
     "fp16": True,
 }
+
+
+@pytest.mark.runs_on(["cpu", "mps"])
+@pytest.mark.parametrize("mask_history", [False, True])
+def test_supervised_turn_mask(mask_history: bool):
+    class DummyMMPlugin:
+        def process_messages(self, messages, images, videos, audios, processor):
+            return messages
+
+        def process_token_ids(self, input_ids, labels, images, videos, audios, tokenizer, processor):
+            return input_ids, labels
+
+    class DummyTemplate:
+        efficient_eos = False
+        preserve_thinking = True
+        mm_plugin = DummyMMPlugin()
+
+        def encode_multiturn(self, tokenizer, messages, system, tools, discarding_history_cot):
+            return [([10], [11, 12]), ([20], [21, 22])]
+
+    class DummyTokenizer:
+        eos_token_id = 2
+
+    data_args = DataArguments(cutoff_len=100, mask_history=mask_history, turn_mask=True)
+    dataset_processor = SupervisedDatasetProcessor(
+        template=DummyTemplate(),
+        tokenizer=DummyTokenizer(),
+        processor=None,
+        data_args=data_args,
+    )
+    input_ids, labels, _, full_length = dataset_processor._encode_data_example(
+        prompt=[
+            {"role": "user", "content": "first question", "turn_mask": False},
+            {"role": "assistant", "content": "first answer", "turn_mask": True},
+            {"role": "user", "content": "second question", "turn_mask": False},
+        ],
+        response=[{"role": "assistant", "content": "second answer", "turn_mask": False}],
+        system=None,
+        tools=None,
+        images=[],
+        videos=[],
+        audios=[],
+    )
+
+    assert input_ids == [10, 11, 12, 20, 21, 22]
+    assert labels == [IGNORE_INDEX, IGNORE_INDEX, IGNORE_INDEX, IGNORE_INDEX, 21, 22]
+    assert full_length == 6
 
 
 @pytest.mark.runs_on(["cpu", "mps"])
@@ -128,9 +175,7 @@ def test_supervised_loss_weights():
     example = {key: value[0] for key, value in model_inputs.items()}
     assert len(example["loss_weights"]) == len(example["input_ids"]) == len(example["labels"])
     assert all(
-        weight == 0.0
-        for label, weight in zip(example["labels"], example["loss_weights"])
-        if label == IGNORE_INDEX
+        weight == 0.0 for label, weight in zip(example["labels"], example["loss_weights"]) if label == IGNORE_INDEX
     )
 
     valid_weights = [

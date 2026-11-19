@@ -55,6 +55,8 @@ def _get_output_value(outputs: Union[dict[str, Any], Any], key: str) -> Any:
 def _compute_weighted_loss(outputs: Union[dict[str, Any], Any], labels: "torch.Tensor", loss_weights: "torch.Tensor"):
     logits = _get_output_value(outputs, "logits")
     if logits is None:
+        if torch.any(loss_weights[labels != IGNORE_INDEX] != 1):
+            raise ValueError("Fractional loss weights require token logits; disable fused HF loss (e.g. Liger).")
         loss = _get_output_value(outputs, "loss")
         if loss is None:
             return torch.tensor(0.0, device=labels.device)
@@ -73,7 +75,7 @@ def _compute_weighted_loss(outputs: Union[dict[str, Any], Any], labels: "torch.T
         reduction="none",
     ).view_as(shift_labels)
     valid_weights = shift_weights * (shift_labels != IGNORE_INDEX).to(shift_weights.dtype)
-    denom = valid_weights.sum()
+    denom = (shift_labels != IGNORE_INDEX).sum()
     if denom <= 0:
         return per_token_loss.sum() * 0.0
 
@@ -101,10 +103,9 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
                 patch_accelerator_for_fp8()
 
         super().__init__(**kwargs)
-        if processor is not None:
-            # avoid wrong loss under gradient accumulation
-            # https://github.com/huggingface/transformers/pull/36044#issuecomment-2746657112
-            self.model_accepts_loss_kwargs = False
+        # Our weighted loss is a microbatch mean and does not use num_items_in_batch.
+        # Let Trainer average these means over the actual gradient accumulation window.
+        self.model_accepts_loss_kwargs = False
 
         self.finetuning_args = finetuning_args
         if gen_kwargs is not None:
@@ -195,7 +196,9 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
                 ref_logits = ref_outputs.logits
             outputs = model(**inputs)
             return self.compute_loss_func(outputs, inputs["labels"], ref_logits)
-        elif loss_weights is not None and not (self.finetuning_args.use_dft_loss or self.finetuning_args.use_eaft_loss):
+        elif loss_weights is not None and not (
+            self.finetuning_args.use_dft_loss or self.finetuning_args.use_eaft_loss
+        ):
             outputs = model(**inputs)
             loss = _compute_weighted_loss(outputs, inputs["labels"], loss_weights)
             return (loss, outputs) if kwargs.get("return_outputs", False) else loss
@@ -250,7 +253,6 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
                 unwrapped.save_pretrained(output_dir, state_dict=state_dict, max_shard_size="5GB")
             else:
                 import safetensors.torch
-
                 from transformers.utils import SAFE_WEIGHTS_NAME
 
                 logger.info_rank0("Trainer.model is not a `PreTrainedModel`, only saving its state dict.")

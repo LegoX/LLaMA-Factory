@@ -166,10 +166,10 @@ class SharegptDatasetConverter(DatasetConverter):
             aligned_message = {
                 "role": tag_mapping[message[self.dataset_attr.role_tag]],
                 "content": message[self.dataset_attr.content_tag],
+                "turn_mask": bool(message.get("turn_mask", False)),
             }
-            if (
-                isinstance(message.get("loss_weight"), (int, float))
-                and not isinstance(message.get("loss_weight"), bool)
+            if isinstance(message.get("loss_weight"), (int, float)) and not isinstance(
+                message.get("loss_weight"), bool
             ):
                 aligned_message["loss_weight"] = float(message["loss_weight"])
 
@@ -229,6 +229,14 @@ class SharegptDatasetConverter(DatasetConverter):
             "_videos": self._find_medias(example[self.dataset_attr.videos]) if self.dataset_attr.videos else None,
             "_audios": self._find_medias(example[self.dataset_attr.audios]) if self.dataset_attr.audios else None,
         }
+        if self.data_args.trajectory_loss_weight:
+            column = self.dataset_attr.loss_weight
+            if not column or column not in example:
+                raise ValueError("trajectory_loss_weight requires an explicit dataset loss_weight column.")
+            weight = example[column]
+            if isinstance(weight, bool) or not isinstance(weight, (int, float)) or not 0 < weight <= 1:
+                raise ValueError("loss_weight must be a finite number in (0, 1]. Use turn_mask for zero loss.")
+            output["_loss_weight"] = float(weight)
         return output
 
 
@@ -284,6 +292,7 @@ class OpenAIDatasetConverter(DatasetConverter):
                 {
                     "role": tag_mapping[role],
                     "content": content,
+                    "turn_mask": bool(message.get("turn_mask", False)),
                 }
             )
 
@@ -389,10 +398,26 @@ def register_dataset_converter(name: str, dataset_converter: type["DatasetConver
 
 def get_dataset_converter(name: str, dataset_attr: "DatasetAttr", data_args: "DataArguments") -> "DatasetConverter":
     r"""Get a dataset converter."""
+    if data_args.trajectory_loss_weight and (name != "sharegpt" or dataset_attr.ranking or dataset_attr.kto_tag):
+        raise ValueError("trajectory_loss_weight currently supports ordinary ShareGPT SFT examples only.")
     if name not in DATASET_CONVERTERS:
         raise ValueError(f"Dataset converter {name} not found.")
 
     return DATASET_CONVERTERS[name](dataset_attr, data_args)
+
+
+def _convert_with_score_source(example, converter):
+    converted = converter(example)
+    converted["_score_source"] = json.dumps(
+        {
+            "dataset": converter.dataset_attr.dataset_name,
+            "split": converter.dataset_attr.split,
+            "source_row_index": example["_score_source_index"],
+            "original_id": str(example["id"]) if example.get("id") is not None else None,
+        },
+        ensure_ascii=False,
+    )
+    return converted
 
 
 def align_dataset(
@@ -422,6 +447,10 @@ def align_dataset(
         )
 
     dataset_converter = get_dataset_converter(dataset_attr.formatting, dataset_attr, data_args)
+    if data_args.pretrain_score:
+        from functools import partial
+
+        dataset_converter = partial(_convert_with_score_source, converter=dataset_converter)
     return dataset.map(
         dataset_converter,
         batched=False,

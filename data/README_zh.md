@@ -29,7 +29,8 @@
     "audios": "数据集代表音频输入的表头名称（默认：None）",
     "chosen": "数据集代表更优回答的表头名称（默认：None）",
     "rejected": "数据集代表更差回答的表头名称（默认：None）",
-    "kto_tag": "数据集代表 KTO 标签的表头名称（默认：None）"
+    "kto_tag": "数据集代表 KTO 标签的表头名称（默认：None）",
+    "loss_weight": "样本级轨迹权重的表头名称（默认：None；启用 trajectory_loss_weight 时必填）"
   },
   "tags（可选，用于 sharegpt 格式）": {
     "role_tag": "消息中代表发送者身份的键名（默认：from）",
@@ -42,6 +43,14 @@
   }
 }
 ```
+
+## 逐轮监督与损失权重（SFT）
+
+- 训练配置设为 `turn_mask: true` 时，assistant/function 消息中的 `turn_mask: true` 会保留该轮上下文，但屏蔽该轮及其结尾 EOS 的监督。支持 ShareGPT 和 OpenAI 消息转换，可与 `mask_history` 组合。
+- ShareGPT 的 assistant/function 消息可携带数值类型、有限且非负的 `loss_weight`；`0` 表示屏蔽该轮。消息权重不依赖轨迹权重开关。
+- 样本级 `loss_weight` 需要启用 `trajectory_loss_weight: true`，并在 `dataset_info.json` 中显式设置 `columns.loss_weight`。取值必须是 `(0, 1]` 内的有限数值。目前仅支持未 packing 的普通 MCA ShareGPT SFT；ranking/KTO 和其他训练后端会报错。
+
+逐轮权重与轨迹权重相乘后作用于 token CE 损失分子，分母按有效监督 token 数计算，因此统一设置为 `0.5` 会将 CE 的梯度贡献缩小一半。Megatron MoE 辅助损失不受这些权重缩放。完整数据注册、样本示例及后端和融合损失限制见[监督控制说明](../docs/long_context_sft.md#template-and-supervision)。更改这些设置后需重建 tokenized 缓存。`drop_long_sequences: true` 丢弃完整编码长度超过 `cutoff_len` 的样本，默认行为仍是截断。
 
 ## Alpaca 格式
 

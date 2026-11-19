@@ -142,6 +142,7 @@ class MultiModalDataCollatorForSeq2Seq(DataCollatorForSeq2Seq):
 
     template: Optional["Template"] = None
     processor: Optional["ProcessorMixin"] = None
+    enable_dummy_media: bool = True
 
     def __post_init__(self):
         if self.template is None:
@@ -178,9 +179,13 @@ class MultiModalDataCollatorForSeq2Seq(DataCollatorForSeq2Seq):
             video_token_id = getattr(self.model.config, "video_token_id", None)
             if image_token_id is not None or video_token_id is not None:
                 mm_token_type_ids = torch.zeros_like(features["input_ids"])
-                if image_token_id is not None:
+                # Reserved media tokens may occur literally in code or tool
+                # output. They describe media only when that media is present.
+                image_grid = rope_index_kwargs["image_grid_thw"]
+                video_grid = rope_index_kwargs["video_grid_thw"]
+                if image_token_id is not None and image_grid is not None and len(image_grid) > 0:
                     mm_token_type_ids[features["input_ids"] == image_token_id] = 1
-                if video_token_id is not None:
+                if video_token_id is not None and video_grid is not None and len(video_grid) > 0:
                     mm_token_type_ids[features["input_ids"] == video_token_id] = 2
                 rope_index_kwargs["mm_token_type_ids"] = mm_token_type_ids
 
@@ -349,10 +354,34 @@ class MultiModalDataCollatorForSeq2Seq(DataCollatorForSeq2Seq):
 
             packing_params_list.append(feature.pop("packing_params", None))
 
+        # The vision embedding scatter also matches raw token IDs across the batch.
+        # A position-only mask cannot distinguish literal tokens from media here.
+        config = getattr(self.model, "config", None)
+        for modality, lengths in (("image", batch_imglens), ("video", batch_vidlens)):
+            token_id = getattr(config, f"{modality}_token_id", None)
+            dummy_image = (
+                modality == "image"
+                and self.enable_dummy_media
+                and self.template.mm_plugin.image_token is not None
+                and not any(batch_imglens)
+                and not any(batch_vidlens)
+            )
+            if token_id is not None and (any(lengths) or dummy_image):
+                for ids, count in zip(batch_input_ids, lengths):
+                    if count == 0 and token_id in ids:
+                        raise ValueError(
+                            f"Literal {modality} tokens in text-only rows cannot share a batch with "
+                            f"real or dummy {modality} inputs. Separate these rows from media batches "
+                            "and disable dummy media for text-only training when vision modules are frozen."
+                        )
+
         fake_input_ids = []
         has_dummy_image = False
         if (
-            self.template.mm_plugin.image_token is not None and sum(batch_imglens) == 0 and sum(batch_vidlens) == 0
+            self.enable_dummy_media
+            and self.template.mm_plugin.image_token is not None
+            and sum(batch_imglens) == 0
+            and sum(batch_vidlens) == 0
         ):  # avoid process hanging in zero3/fsdp case
             fake_messages = [{"role": "user", "content": IMAGE_PLACEHOLDER}]
             fake_images = [Image.new("RGB", (64, 64), (255, 255, 255))]
@@ -369,7 +398,7 @@ class MultiModalDataCollatorForSeq2Seq(DataCollatorForSeq2Seq):
             has_dummy_image = True
 
         if (
-            self.template.mm_plugin.audio_token is not None and sum(batch_audlens) == 0
+            self.enable_dummy_media and self.template.mm_plugin.audio_token is not None and sum(batch_audlens) == 0
         ):  # avoid process hanging in zero3/fsdp case
             fake_messages = [{"role": "user", "content": AUDIO_PLACEHOLDER}]
             fake_audios = [np.zeros(1600)]

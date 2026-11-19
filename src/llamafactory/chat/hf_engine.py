@@ -103,8 +103,7 @@ class HuggingfaceEngine(BaseEngine):
         messages = template.mm_plugin.process_messages(
             messages, mm_input_dict["images"], mm_input_dict["videos"], mm_input_dict["audios"], processor
         )
-        paired_messages = messages + [{"role": "assistant", "content": ""}]
-        prompt_ids, _ = template.encode_oneturn(tokenizer, paired_messages, system, tools)
+        prompt_ids = template.encode_generation(tokenizer, messages, system, tools)
         prompt_ids, _ = template.mm_plugin.process_token_ids(
             prompt_ids,
             None,

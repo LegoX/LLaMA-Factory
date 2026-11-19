@@ -10,8 +10,9 @@ from ..model_config import McaModelConfig
 @register_config("qwen3_5")
 @dataclass
 class Qwen3_5Config(McaModelConfig):
-    """Qwen3_5Config"""
+    """Qwen3.5 model configuration."""
 
+    mrope_yarn_mscale_mode: str = "rotary_dimensions"
     mrope_yarn_enabled: bool = False
     yarn_rotary_scaling_factor: float = 4.0
     yarn_original_max_position_embeddings: int = 32768

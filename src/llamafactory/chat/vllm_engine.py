@@ -131,8 +131,7 @@ class VllmEngine(BaseEngine):
         messages = self.template.mm_plugin.process_messages(
             messages, images or [], videos or [], audios or [], self.processor
         )
-        paired_messages = messages + [{"role": "assistant", "content": ""}]
-        prompt_ids, _ = self.template.encode_oneturn(self.tokenizer, paired_messages, system, tools)
+        prompt_ids = self.template.encode_generation(self.tokenizer, messages, system, tools)
         prompt_length = len(prompt_ids)
 
         temperature: Optional[float] = input_kwargs.pop("temperature", None)

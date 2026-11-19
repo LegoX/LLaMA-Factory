@@ -49,13 +49,13 @@ def test_sharegpt_converter():
         "conversations": [
             {"from": "system", "value": "You are a helpful assistant."},
             {"from": "human", "value": "Solve the math problem.\n3 + 4"},
-            {"from": "gpt", "value": "The answer is 7."},
+            {"from": "gpt", "value": "The answer is 7.", "turn_mask": True},
         ]
     }
     dataset_converter = get_dataset_converter("sharegpt", dataset_attr, data_args)
     assert dataset_converter(example) == {
-        "_prompt": [{"role": Role.USER.value, "content": "Solve the math problem.\n3 + 4"}],
-        "_response": [{"role": Role.ASSISTANT.value, "content": "The answer is 7."}],
+        "_prompt": [{"role": Role.USER.value, "content": "Solve the math problem.\n3 + 4", "turn_mask": False}],
+        "_response": [{"role": Role.ASSISTANT.value, "content": "The answer is 7.", "turn_mask": True}],
         "_system": "You are a helpful assistant.",
         "_tools": "",
         "_images": None,
@@ -76,5 +76,24 @@ def test_sharegpt_converter_loss_weight():
     }
     dataset_converter = get_dataset_converter("sharegpt", dataset_attr, data_args)
     assert dataset_converter(example)["_response"] == [
-        {"role": Role.ASSISTANT.value, "content": "Safe response.", "loss_weight": 0.5}
+        {"role": Role.ASSISTANT.value, "content": "Safe response.", "loss_weight": 0.5, "turn_mask": False}
     ]
+
+
+def test_sharegpt_null_turn_mask_datasets_can_merge():
+    from datasets import Dataset, concatenate_datasets
+
+    converter = get_dataset_converter("sharegpt", DatasetAttr("hf_hub", "mask-schema-regression"), DataArguments())
+    datasets = []
+    for mask in [None, False, True]:
+        example = {
+            "conversations": [
+                {"from": "human", "value": "Question", "turn_mask": None},
+                {"from": "gpt", "value": "Answer", "turn_mask": mask},
+            ]
+        }
+        aligned = converter(example)
+        assert aligned["_prompt"][0]["turn_mask"] is False
+        assert aligned["_response"][0]["turn_mask"] is bool(mask)
+        datasets.append(Dataset.from_list([aligned]))
+    assert len(concatenate_datasets(datasets)) == 3

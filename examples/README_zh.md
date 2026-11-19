@@ -7,6 +7,7 @@
 - [LoRA 微调](#lora-微调)
 - [QLoRA 微调](#qlora-微调)
 - [全参数微调](#全参数微调)
+- [长上下文 MCA SFT](#长上下文-mca-sft)
 - [合并 LoRA 适配器与模型量化](#合并-lora-适配器与模型量化)
 - [推理 LoRA 模型](#推理-lora-模型)
 - [杂项](#杂项)
@@ -34,6 +35,22 @@ bash examples/train_lora/qwen3_lora_sft.sh
 ```
 
 ## 示例
+
+### 长上下文 MCA SFT
+
+[统一训练说明](../docs/long_context_sft.md)包含环境配置、Qwen3.8 模板、逐轮监督、轨迹权重、训练前评分、运行诊断和 HF 导出。可选配置：
+
+- [Qwen3.5 512K YaRN](megatron/qwen3_5_35b_a3b_base_512k_yarn.yaml)：单机 TP2/PP2/CP2/EP4。
+- [Qwen3.6 256K packed](megatron/qwen3_6_27b_256k_4node.yaml)：四节点训练，支持 CP packing。
+- [Qwen3.8 256K 监督控制](megatron/qwen3_8_27b_256k.yaml)：单机 TP4/PP2/CP1，启用逐轮掩码和轨迹权重。
+
+先替换模型、数据和输出路径并注册数据集。所有配置复用同一个启动入口；先检查合并后的配置和并行拓扑：
+
+```bash
+DRY_RUN=1 bash examples/megatron/512k/run.sh /path/to/env examples/megatron/qwen3_8_27b_256k.yaml
+```
+
+改用 `PREFLIGHT_ONLY=1` 检查依赖和本地输入文件，去掉此前缀即可训练。命令末尾可追加 `key=value` 覆盖配置。预检查不证明长序列能装入显存，实际验证范围见统一说明。
 
 ### LoRA 微调
 

@@ -18,6 +18,7 @@ Contains shared fixtures, pytest configuration, and custom markers.
 """
 
 import os
+from importlib.metadata import PackageNotFoundError, distribution
 
 import pytest
 import torch
@@ -30,6 +31,15 @@ from llamafactory.train.test_utils import patch_valuehead_model
 
 
 CURRENT_DEVICE = get_current_device().type
+
+
+@pytest.fixture(scope="session")
+def megatron_distribution():
+    """Locate optional MCore sources without importing its CUDA-dependent package."""
+    try:
+        return distribution("megatron-core")
+    except PackageNotFoundError:
+        pytest.skip("Install megatron-core to run the MCore source-contract checks")
 
 
 def pytest_configure(config: Config):

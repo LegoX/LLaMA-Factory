@@ -142,6 +142,12 @@ def _load_single_dataset(
         if data_args.streaming and dataset_attr.load_from == "file":
             dataset = dataset.to_iterable_dataset(num_shards=training_args.dataloader_num_workers)
 
+    if data_args.pretrain_score:
+        # Attach before sampling/merging/splitting, so scores map back to the source rows.
+        if "_score_source_index" in dataset.column_names:
+            raise ValueError("Reserved dataset column: _score_source_index")
+        dataset = dataset.add_column("_score_source_index", list(range(len(dataset))))
+
     if dataset_attr.num_samples is not None and not data_args.streaming:
         target_num = dataset_attr.num_samples
         indexes = np.random.permutation(len(dataset))[:target_num]  # all samples should be included

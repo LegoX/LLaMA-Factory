@@ -150,6 +150,15 @@ class BaseHFConverter(ABC):
     def _finalize(self):
         """Saves configs, tokenizer, processor, and releases resources."""
         os.makedirs(self.save_directory, exist_ok=True)
+
+        def set_dtype(config):
+            config.torch_dtype = self.torch_dtype
+            for name in config.sub_configs:
+                sub_config = getattr(config, name, None)
+                if sub_config is not None:
+                    set_dtype(sub_config)
+
+        set_dtype(self.hf_config)
         self.hf_config.save_pretrained(self.save_directory)
         self.mca_config.save_hf_auto_map_files(self.save_directory)
 
@@ -232,6 +241,8 @@ class StreamingHFConverter(BaseHFConverter):
         for hf_name, hf_weight in tqdm(
             self._stream_hf_weights(self.checkpoint_path, use_mmap=True), desc="Converting mca to hf"
         ):
+            if hf_weight.is_floating_point():
+                hf_weight = hf_weight.to(dtype=self.torch_dtype)
             # the hf_name may be replicated
             if hf_name in weight_map:
                 # check the weight in the current chard
@@ -602,6 +613,8 @@ class DistStreamingHFConverter(DistHFConverter):
             self._stream_dist_weights_from_shards(sharded_state_dict),
             desc="Converting dist checkpoint to hf"
         ):
+            if hf_weight.is_floating_point():
+                hf_weight = hf_weight.to(dtype=self.torch_dtype)
             # The hf_name may be replicated (e.g., shared embeddings)
             if hf_name in weight_map:
                 # Check consistency

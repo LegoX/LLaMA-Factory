@@ -47,6 +47,10 @@ class DataArguments:
         default=2048,
         metadata={"help": "The cutoff length of the tokenized inputs in the dataset."},
     )
+    drop_long_sequences: bool = field(
+        default=False,
+        metadata={"help": "Drop examples whose full tokenized length exceeds cutoff_len instead of truncating them."},
+    )
     train_on_prompt: bool = field(
         default=False,
         metadata={"help": "Whether or not to disable the mask on the prompt."},
@@ -54,6 +58,30 @@ class DataArguments:
     mask_history: bool = field(
         default=False,
         metadata={"help": "Whether or not to mask the history and train on the last turn only."},
+    )
+    turn_mask: bool = field(
+        default=False,
+        metadata={"help": "Whether or not to mask assistant turns marked with `turn_mask` in the dataset."},
+    )
+    trajectory_loss_weight: bool = field(
+        default=False,
+        metadata={
+            "help": "Apply dataset loss_weight to the loss numerator, retaining the original token denominator (MCA SFT only)."
+        },
+    )
+    pretrain_score: bool = field(
+        default=False,
+        metadata={"help": "Score each training sample and assistant turn before MCA SFT (unpacked text, CP1/DP1)."},
+    )
+    pretrain_score_microbatches: int = field(
+        default=16,
+        metadata={
+            "help": "Number of independent single-row microbatches per scoring pipeline call; 1 restores serial scoring."
+        },
+    )
+    pretrain_score_only: bool = field(
+        default=False,
+        metadata={"help": "Exit after pretrain_score without optimizer updates or saving model weights."},
     )
     streaming: bool = field(
         default=False,
@@ -125,9 +153,15 @@ class DataArguments:
         default=True,
         metadata={"help": "Whether or not to enable thinking mode for reasoning models."},
     )
-    preserve_thinking: bool = field(
-        default=False,
-        metadata={"help": "Whether or not to preserve thinking content in historical turns for reasoning models."},
+    reasoning_effort: str = field(
+        default="xhigh",
+        metadata={"help": "Reasoning effort for Qwen3.8 (xhigh, medium, or low)."},
+    )
+    preserve_thinking: bool | None = field(
+        default=None,
+        metadata={
+            "help": "Preserve historical thinking for reasoning models. In SFT, false removes it only with mask_history=true."
+        },
     )
     tokenized_path: str | None = field(
         default=None,
@@ -145,6 +179,34 @@ class DataArguments:
     )
 
     def __post_init__(self):
+        if (
+            isinstance(self.pretrain_score_microbatches, bool)
+            or not isinstance(self.pretrain_score_microbatches, int)
+            or self.pretrain_score_microbatches < 1
+        ):
+            raise ValueError("pretrain_score_microbatches must be a positive integer.")
+        if self.pretrain_score_only and not self.pretrain_score:
+            raise ValueError("pretrain_score_only requires pretrain_score=true.")
+        if self.pretrain_score and (
+            self.packing
+            or self.neat_packing
+            or self.streaming
+            or self.train_on_prompt
+            or self.mask_history
+            or self.turn_mask
+            or self.trajectory_loss_weight
+            or self.tokenized_path
+            or self.drop_long_sequences
+        ):
+            raise ValueError(
+                "pretrain_score requires unpacked, non-streaming SFT with all assistant turns supervised, "
+                "no trajectory weights, no tokenized_path and drop_long_sequences=false."
+            )
+        if self.trajectory_loss_weight and (self.packing or self.neat_packing):
+            raise ValueError("trajectory_loss_weight currently requires unpacked MCA SFT.")
+        if self.reasoning_effort not in {"xhigh", "medium", "low"}:
+            raise ValueError("`reasoning_effort` must be one of xhigh, medium, or low.")
+
         def split_arg(arg):
             if isinstance(arg, str):
                 return [item.strip() for item in arg.split(",")]

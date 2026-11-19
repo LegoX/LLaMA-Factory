@@ -105,7 +105,11 @@ class ChatModel:
         **input_kwargs,
     ) -> list["Response"]:
         r"""Asynchronously get a list of responses of the chat model."""
-        return await self.engine.chat(messages, system, tools, images, videos, audios, **input_kwargs)
+        responses = await self.engine.chat(messages, system, tools, images, videos, audios, **input_kwargs)
+        prefix = self.engine.template.get_response_prefix()
+        for response in responses:
+            response.response_text = prefix + response.response_text
+        return responses
 
     def stream_chat(
         self,
@@ -137,10 +141,12 @@ class ChatModel:
         **input_kwargs,
     ) -> AsyncGenerator[str, None]:
         r"""Asynchronously get the response token-by-token of the chat model."""
+        prefix = self.engine.template.get_response_prefix()
         async for new_token in self.engine.stream_chat(
             messages, system, tools, images, videos, audios, **input_kwargs
         ):
-            yield new_token
+            yield prefix + new_token
+            prefix = ""
 
     def get_scores(
         self,

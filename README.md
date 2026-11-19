@@ -658,15 +658,17 @@ See [examples/README.md](examples/README.md) for advanced usage (including distr
 
 ### Qwen3.5 512K Training
 
+[Unified long-context SFT: Qwen3.8, supervision weights, pre-update scoring, diagnostics and HF export](docs/long_context_sft.md).
+
 For single-node **8×H200** Qwen3.5-35B-A3B-Base full SFT, see the [512K guide](examples/megatron/README_512k.md) and [sanitized YAML](examples/megatron/qwen3_5_35b_a3b_base_512k_yarn.yaml). This uses `USE_MCA=1` with **mcore_adapter / Megatron-Core**, not Megatron Bridge: TP2 / PP2 / CP2 / EP4 / ETP1, YaRN factor 2, BF16 computation, FP32 gradient accumulation, and 75% optimizer CPU offload.
 
-The guide includes the workflow integration, a fixed-baseline adapter patch with checksums, isolated-environment installation instructions, and a checked launcher; stock packages plus the YAML alone are not sufficient. Optimizer steps have been observed, but this does not certify completion of full training, HF export, or evaluation. Replace placeholder paths and register your dataset. Do not launch on occupied GPUs.
+The repository includes the workflow and adapter in `src/mcore_adapter`, together with pinned-environment installation instructions and a common launcher. The adapter is also shipped in the wheel. The original reference run reached optimizer steps; the current integration's CPU checks and remaining GPU validation are documented in the [validation section](docs/long_context_sft.md#validation). Replace placeholder paths and register your dataset before launching on available GPUs.
 
 ### Training, export, serving and evaluation
 
 This repository handles preprocessing, training and HF export. **The exported HF model directory is the handoff point:** SGLang runs in its own environment; Harbor / OpenHands runs evaluation against its OpenAI-compatible API. Neither serving nor evaluation needs to launch through LLaMA-Factory.
 
-Reuse existing entry points and put experiment settings in YAML instead of copying per-run scripts. Training requires the pinned ROLL adapter and environment in the [512K guide](examples/megatron/README_512k.md). Preprocessing validates token-level loss masks. With `use_mca: true` (or `USE_MCA=1`), successful CLI training automatically converts native checkpoints to `export_dir` or `output_dir + "-hf"`, preserving trained precision, MRoPE/YaRN settings and the chat template. Non-Megatron training, `save_hf_model: true`, and skipped final saves bypass conversion.
+Reuse existing entry points and put experiment settings in YAML. Training uses the in-tree adapter and pinned environment in the [512K guide](examples/megatron/README_512k.md). Preprocessing validates token-level loss masks. With `use_mca: true` (or `USE_MCA=1`), successful CLI training automatically converts native checkpoints to `export_dir` or `output_dir + "-hf"`, preserving trained precision, MRoPE/YaRN settings and the chat template. Non-Megatron training, `save_hf_model: true`, skipped final saves, and `pretrain_score_only: true` bypass conversion. Custom MRoPE/YaRN requires `save_hf_model: false` so export can finalize metadata and legacy weights. Manual conversion uses the same [packaged export implementation](docs/long_context_sft.md#hf-export).
 
 | Current deployment | DPSK v4.1 Flash | Qwen3.6-35B-A3B Instruct |
 | --- | --- | --- |
